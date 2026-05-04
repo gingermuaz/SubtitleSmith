@@ -23,21 +23,25 @@ Featuring drag-and-drop file support and an intelligent hardware scanner that au
 
 ## Setup & Installation
 
-1. **Clone the repository:**
+1. **Install FFmpeg (Required for audio extraction & video hardcoding):**
+   ```bash
+   winget install ffmpeg
+
+2. **Clone the repository:**
    ```bash
    git clone https://github.com/gingermuaz/SubtitleSmith.git
    cd SubtitleSmith
 
-2. **Create a virtual environment:**
+3. **Create a virtual environment:**
    ```bash
    python -m venv .venv
    .\.venv\Scripts\activate
 
-3. **Install dependencies:**
+4. **Install dependencies:**
    ```bash
-   python -m pip install faster-whisper ctranslate2 customtkinter nvidia-cublas-cu12 nvidia-cudnn-cu12 psutil tkinterdnd2
+   python -m pip install faster-whisper ctranslate2 customtkinter nvidia-cublas-cu12 nvidia-cudnn-cu12 psutil tkinterdnd2 tqdm
 
-4. **Run the Application:**
+5. **Run the Application:**
    ```bash
    python GUI.py
 
