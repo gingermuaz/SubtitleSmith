@@ -1,6 +1,6 @@
 # Movie Translator Studio
 
-A local, AI-powered desktop application that extracts audio from video files and converts it to synchronized `.srt` subtitles using the NVIDIA CUDA engine and `faster-whisper`. 
+A local, AI-powered desktop application that extracts audio from video files and converts it to synchronised `.srt` subtitles using the NVIDIA CUDA engine and `faster-whisper`. 
 
 All processing runs locally on your machine—no internet connection or API keys required!
 
@@ -36,7 +36,9 @@ All processing runs locally on your machine—no internet connection or API keys
    ```bash
    python GUI.py
 
-Usage
+---
+
+# Usage:
 Click Browse to select your .mp4 video file (the save location automatically appears next to it).
 
 Choose your Source Language and AI Model Size.
