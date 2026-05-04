@@ -1,8 +1,8 @@
 # SubtitleSmith
 
-A local, AI-powered desktop application that extracts audio from video files and converts it to synchronised `.srt` subtitles using the NVIDIA CUDA engine and `faster-whisper`. 
+SubtitleSmith is a local, AI-powered desktop application that extracts audio from video files and converts it to synchronised `.srt` subtitles using the NVIDIA CUDA engine and `faster-whisper`. 
 
-All processing runs locally on your machine—no internet connection or API keys required!
+Featuring drag-and-drop file support and an intelligent hardware scanner that automatically recommends the best AI model for your system's VRAM. All processing runs locally on your machine—no internet connection or API keys required!
 
 ## Features
 - **Hardware Accelerated:** Processes video files using your NVIDIA GPU (RTX 3070 or similar).
@@ -21,7 +21,7 @@ All processing runs locally on your machine—no internet connection or API keys
 1. **Clone the repository:**
    ```bash
    git clone https://github.com/gingermuaz/SubtitleSmith.git
-   cd MovieTranslation
+   cd SubtitleSmith
 
 2. **Create a virtual environment:**
    ```bash
@@ -30,7 +30,7 @@ All processing runs locally on your machine—no internet connection or API keys
 
 3. **Install dependencies:**
    ```bash
-   python -m pip install faster-whisper ctranslate2 customtkinter nvidia-cublas-cu12 nvidia-cudnn-cu12
+   python -m pip install faster-whisper ctranslate2 customtkinter nvidia-cublas-cu12 nvidia-cudnn-cu12 psutil tkinterdnd2
 
 4. **Run the Application:**
    ```bash
