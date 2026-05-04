@@ -1,48 +1,63 @@
 import psutil
 import subprocess
 import platform
+import os
+
+# OS Detection
+IS_WINDOWS = platform.system() == "Windows"
 
 # Windows constant to hide the command prompt from popping up
-CREATE_NO_WINDOW = 0x08000000
+CREATE_NO_WINDOW = 0x08000000 if IS_WINDOWS else 0
 
 
 def get_clean_cpu_name():
-    """Attempts to get a clean CPU model name from the Windows Registry."""
-    try:
-        import winreg
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
-        name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
-        return name.replace("(R)", "").replace("(TM)", "").replace(" CPU", "").strip()
-    except Exception:
+    """Attempts to get a clean CPU model name dynamically based on the OS."""
+    if IS_WINDOWS:
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+            name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+            return name.replace("(R)", "").replace("(TM)", "").replace(" CPU", "").strip()
+        except Exception:
+            return platform.processor() or "Unknown CPU"
+    else:
+        # Linux Fallback
+        try:
+            with open('/proc/cpuinfo', 'r') as f:
+                for line in f:
+                    if 'model name' in line:
+                        return line.split(':')[1].strip()
+        except Exception:
+            pass
         return platform.processor() or "Unknown CPU"
 
 
 def get_advanced_ram_info(fallback_gb):
-    """Uses a hidden PowerShell query to grab physical RAM details from the motherboard."""
-    try:
-        # PowerShell command to get Sticks, Slots, Speed, and Form Factor
-        ps_cmd = (
-            "$sticks = @(Get-CimInstance Win32_PhysicalMemory); "
-            "$slots = (Get-CimInstance Win32_PhysicalMemoryArray | Measure-Object -Property MemoryDevices -Sum).Sum; "
-            "$speed = $sticks[0].Speed; "
-            "$form = if ($sticks[0].FormFactor -eq 12) { 'SODIMM' } else { 'DIMM' }; "
-            "Write-Output \"$($sticks.Count),$slots,$speed,$form\""
-        )
+    """Uses OS-specific commands to grab physical RAM details."""
+    if IS_WINDOWS:
+        try:
+            # PowerShell command to get Sticks, Slots, Speed, and Form Factor
+            ps_cmd = (
+                "$sticks = @(Get-CimInstance Win32_PhysicalMemory); "
+                "$slots = (Get-CimInstance Win32_PhysicalMemoryArray | Measure-Object -Property MemoryDevices -Sum).Sum; "
+                "$speed = $sticks[0].Speed; "
+                "$form = if ($sticks[0].FormFactor -eq 12) { 'SODIMM' } else { 'DIMM' }; "
+                "Write-Output \"$($sticks.Count),$slots,$speed,$form\""
+            )
 
-        output = subprocess.check_output(
-            ['powershell', '-NoProfile', '-Command', ps_cmd],
-            encoding='utf-8',
-            creationflags=CREATE_NO_WINDOW
-        ).strip()
+            output = subprocess.check_output(
+                ['powershell', '-NoProfile', '-Command', ps_cmd],
+                encoding='utf-8',
+                creationflags=CREATE_NO_WINDOW
+            ).strip()
 
-        if output:
-            stick_count, total_slots, speed, form_factor = output.split(',')
-            # Formats to: 16 GB (2/4 Slots Filled | DIMM @ 3200 MT/s)
-            return f"{fallback_gb} GB ({stick_count}/{total_slots} Slots Filled | {form_factor} @ {speed} MT/s)"
-    except Exception:
-        pass  # If Windows blocks the PowerShell query, it silently fails
+            if output:
+                stick_count, total_slots, speed, form_factor = output.split(',')
+                return f"{fallback_gb} GB ({stick_count}/{total_slots} Slots Filled | {form_factor} @ {speed} MT/s)"
+        except Exception:
+            pass
 
-    # Fallback to standard readout if the deep scan fails
+            # Fallback for Linux (Deep RAM inspection on Linux requires sudo/root access, so we stick to the safe total amount)
     return f"{fallback_gb} GB"
 
 
@@ -65,10 +80,14 @@ def scan_system():
     has_gpu = False
 
     try:
+        # Build the arguments dynamically so we don't pass Windows flags to Linux
+        subprocess_kwargs = {'encoding': 'utf-8'}
+        if IS_WINDOWS:
+            subprocess_kwargs['creationflags'] = CREATE_NO_WINDOW
+
         smi_output = subprocess.check_output(
             ['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'],
-            encoding='utf-8',
-            creationflags=CREATE_NO_WINDOW
+            **subprocess_kwargs
         )
         if smi_output.strip():
             parts = smi_output.strip().split(', ')
