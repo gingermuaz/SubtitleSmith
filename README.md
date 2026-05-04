@@ -42,13 +42,14 @@ Featuring drag-and-drop file support and an intelligent hardware scanner that au
    python GUI.py
 
 ## Usage
-Click Browse to select your .mp4 video file (the save location automatically appears next to it).
 
-Choose your Source Language and AI Model Size.
-
-Select your desired Action (Translate to English or Transcribe in the original language).
-
-Click Start Processing and monitor the progress.
-
-
+1. **Import Media:** Drag and drop one or multiple video/audio files directly into the application window, or click **Browse** to select them. (Batch queue processing is fully supported!)
+2. **Configure AI Settings:** Choose your **Source Language** (or use Auto-Detect) and select an **AI Model**. The built-in hardware scanner will automatically recommend the best model for your PC.
+3. **Choose Action:** Select whether to **Translate to English** or **Keep Original Language** (Transcribe).
+4. **Tweak Advanced Settings (Optional):**
+    * **Format:** Choose between `.srt`, `.vtt`, or plain `.txt` outputs.
+    * **Compute:** Force the app to use your CPU if you are troubleshooting GPU issues.
+    * **VAD Filter:** Leave this enabled to automatically ignore silent parts of the audio, preventing AI hallucinations.
+    * **Burn Subtitles to Video:** Enable this to permanently hardcode the generated text into a brand new video file.
+5. **Process:** Click **Start Processing**. SubtitleSmith will process your queue and automatically save the outputs in the exact same folder as your original media!
 ---
