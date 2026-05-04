@@ -55,5 +55,3 @@ Click Start Processing and monitor the progress.
 5. Click **Commit directly to the `main` branch**.
 
 ***
-
-Would you like to move on to adding **Drag and Drop file support** to your interface next?
