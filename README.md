@@ -36,7 +36,7 @@ All processing runs locally on your machine—no internet connection or API keys
    ```bash
    python GUI.py
 
-# Usage
+## Usage
 Click Browse to select your .mp4 video file (the save location automatically appears next to it).
 
 Choose your Source Language and AI Model Size.
