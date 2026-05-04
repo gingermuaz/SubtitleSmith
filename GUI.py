@@ -202,6 +202,7 @@ def start_process():
 if __name__ == "__main__":
     root = TkinterDnD.Tk()
     root.title("SubtitleSmith")
+    root.iconbitmap("SubtitleSmith.ico")
     root.geometry("780x580")  # Increased height slightly for the extra row
     root.resizable(False, False)
     root.attributes('-alpha', 1.0)
