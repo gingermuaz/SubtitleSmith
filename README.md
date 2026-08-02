@@ -57,3 +57,5 @@ Featuring drag-and-drop file support and an intelligent hardware scanner that au
     * **Burn Subtitles to Video:** Enable this to permanently hardcode the generated text into a brand new video file.
 5. **Process:** Click **Start Processing**. SubtitleSmith will process your queue and automatically save the outputs in the exact same folder as your original media!
 ---
+<img width="1222" height="957" alt="image" src="https://github.com/user-attachments/assets/923db541-22ff-41c7-a457-447769c23c5c" />
+
