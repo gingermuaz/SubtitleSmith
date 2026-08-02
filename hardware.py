@@ -6,7 +6,6 @@ import platform
 IS_WINDOWS = platform.system() == "Windows"
 CREATE_NO_WINDOW = 0x08000000 if IS_WINDOWS else 0
 
-
 def get_clean_cpu_name():
     if IS_WINDOWS:
         try:
@@ -26,7 +25,6 @@ def get_clean_cpu_name():
             pass
         return platform.processor() or "Unknown CPU"
 
-
 def get_advanced_ram_info(fallback_gb):
     if IS_WINDOWS:
         try:
@@ -45,7 +43,6 @@ def get_advanced_ram_info(fallback_gb):
         except Exception:
             pass
     return f"{fallback_gb} GB"
-
 
 def scan_system():
     cpu_name = get_clean_cpu_name()
@@ -79,7 +76,9 @@ def scan_system():
     rec_model = "tiny (Fastest / Low Accuracy)"
     if has_gpu:
         if vram_gb >= 8:
-            rec_model = "large-v3 (Slowest / Best Accuracy)"
+            rec_model = "large-v3-turbo (3x Faster / High Accuracy)"
+        elif vram_gb >= 6:
+            rec_model = "distil-large-v3 (6x Faster / High Accuracy)"
         elif vram_gb >= 4:
             rec_model = "small (Balanced)"
         else:

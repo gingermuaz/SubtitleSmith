@@ -21,8 +21,12 @@ LANGUAGES = [
 ]
 
 MODELS = [
-    "tiny (Fastest / Low Accuracy)", "base (Fast / Basic Accuracy)",
-    "small (Balanced)", "medium (Slower / High Accuracy)",
+    "tiny (Fastest / Low Accuracy)",
+    "base (Fast / Basic Accuracy)",
+    "small (Balanced)",
+    "medium (Slower / High Accuracy)",
+    "distil-large-v3 (6x Faster / High Accuracy)",
+    "large-v3-turbo (3x Faster / High Accuracy)",
     "large-v3 (Slowest / Best Accuracy)"
 ]
 
@@ -135,7 +139,7 @@ def cancel_process():
     cancel_button.configure(state="disabled")
 
 
-def run_translation_thread(videos, lang_code, save_val, model_sz, task_type, compute, vad, fmt, hardcode):
+def run_translation_thread(videos, lang_code, save_val, model_sz, task_type, compute, vad, fmt, hardcode, word_ts):
     global batch_prefix
     total_files = len(videos)
 
@@ -161,7 +165,7 @@ def run_translation_thread(videos, lang_code, save_val, model_sz, task_type, com
                 video_path=video, source_language=lang_code, output_file=out_path,
                 model_size=model_sz, task=task_type, compute_device=compute,
                 vad_filter=vad, output_format=fmt, hardcode_subtitles=hardcode,
-                progress_callback=update_gui_progress, cancel_check=check_cancel
+                word_timestamps=word_ts, progress_callback=update_gui_progress, cancel_check=check_cancel
             )
 
         if not check_cancel():
@@ -194,7 +198,7 @@ def start_process():
     threading.Thread(
         target=run_translation_thread,
         args=(selected_files.copy(), lang_code, save_path_var.get(), model_code, task_code, compute_code, vad_var.get(),
-              format_var.get(), hardcode_var.get()),
+              format_var.get(), hardcode_var.get(), word_timestamps_var.get()),
         daemon=True
     ).start()
 
@@ -203,7 +207,7 @@ if __name__ == "__main__":
     root = TkinterDnD.Tk()
     root.title("SubtitleSmith")
     root.iconbitmap("SubtitleSmith.ico")
-    root.geometry("780x580")  # Increased height slightly for the extra row
+    root.geometry("780x580")
     root.resizable(False, False)
     root.attributes('-alpha', 1.0)
     try:
@@ -220,7 +224,8 @@ if __name__ == "__main__":
     compute_var = ctk.StringVar(value=COMPUTE_OPTIONS[0])
     vad_var = ctk.BooleanVar(value=True)
     theme_var = ctk.BooleanVar(value=False)
-    hardcode_var = ctk.BooleanVar(value=False)  # Variable for hardcoding
+    hardcode_var = ctk.BooleanVar(value=False)
+    word_timestamps_var = ctk.BooleanVar(value=False)  # New variable for Word-Level Timestamps
     status_var = ctk.StringVar(value="Ready")
 
     format_var.trace_add("write", update_extension_in_path)
@@ -253,7 +258,7 @@ if __name__ == "__main__":
     ctk.CTkLabel(options_frame, text="Source Language:").pack(side="left", padx=(0, 5))
     ctk.CTkOptionMenu(options_frame, variable=lang_var, values=LANGUAGES, width=170).pack(side="left", padx=(0, 25))
     ctk.CTkLabel(options_frame, text="AI Model:").pack(side="left", padx=(0, 5))
-    ctk.CTkOptionMenu(options_frame, variable=model_var, values=MODELS, width=240).pack(side="left")
+    ctk.CTkOptionMenu(options_frame, variable=model_var, values=MODELS, width=270).pack(side="left")
 
     # 3. Action Toggle
     action_frame = ctk.CTkFrame(frame, fg_color="transparent")
@@ -272,10 +277,11 @@ if __name__ == "__main__":
                                                                                                padx=(0, 15))
     ctk.CTkSwitch(adv_frame, text="VAD Filter", variable=vad_var).pack(side="left", padx=(0, 15))
 
-    # 5. Advanced Settings Row 2
+    # 5. Advanced Settings Row 2 (Added Word Timestamps)
     adv2_frame = ctk.CTkFrame(frame, fg_color="transparent")
     adv2_frame.grid(row=5, column=0, columnspan=4, pady=(5, 5))
     ctk.CTkSwitch(adv2_frame, text="Burn Subtitles to Video", variable=hardcode_var).pack(side="left", padx=(0, 20))
+    ctk.CTkSwitch(adv2_frame, text="Word Timestamps", variable=word_timestamps_var).pack(side="left", padx=(0, 20))
     ctk.CTkSwitch(adv2_frame, text="Light UI", variable=theme_var, command=toggle_theme).pack(side="left")
 
     # 6. Status

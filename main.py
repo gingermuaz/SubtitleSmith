@@ -34,42 +34,79 @@ def format_timestamp(seconds: float, is_vtt=False):
 
 def translate_movie(video_path, source_language, output_file, model_size="large-v3", task="translate",
                     compute_device="auto", vad_filter=True, output_format=".srt", hardcode_subtitles=False,
-                    progress_callback=None, cancel_check=None):
+                    word_timestamps=False, progress_callback=None, cancel_check=None):
+    # Map UI strings to HuggingFace repositories for the new optimized models
+    MODEL_MAPPINGS = {
+        "distil-large-v3": "Systran/faster-distil-whisper-large-v3",
+        "large-v3-turbo": "deepdml/faster-whisper-large-v3-turbo-ct2",
+    }
+    actual_model = MODEL_MAPPINGS.get(model_size, model_size)
+
     if progress_callback: progress_callback(0, 100, f"Loading '{model_size}' model onto {compute_device.upper()}...")
 
     c_type = "int8" if compute_device == "cpu" else "int8_float16"
-    model = WhisperModel(model_size, device=compute_device, compute_type=c_type)
+    model = WhisperModel(actual_model, device=compute_device, compute_type=c_type)
 
     if progress_callback: progress_callback(0, 100, "Extracting audio and analyzing...")
 
     lang_param = None if source_language == "auto" else source_language
-    segments, info = model.transcribe(video_path, task=task, language=lang_param, vad_filter=vad_filter)
+
+    # Advanced tuning for VHS static and noisy background audio
+    vad_params = dict(min_silence_duration_ms=500, speech_pad_ms=400) if vad_filter else None
+
+    segments, info = model.transcribe(
+        video_path,
+        task=task,
+        language=lang_param,
+        beam_size=10,
+        best_of=5,
+        temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+        initial_prompt="Clear, formal dialogue, high-definition audio transcription.",
+        vad_filter=vad_filter,
+        vad_parameters=vad_params,
+        word_timestamps=word_timestamps
+    )
     total_duration = round(info.duration, 2)
 
     content = "WEBVTT\n\n" if output_format == ".vtt" else ""
     is_vtt = (output_format == ".vtt")
 
+    subtitle_index = 1
+
     with tqdm(total=total_duration, unit="sec",
               bar_format="{l_bar}{bar}| {n:.1f}/{total:.1f} [{elapsed}<{remaining}]") as pbar:
-        for index, segment in enumerate(segments, start=1):
+        for segment in segments:
             if cancel_check and cancel_check():
                 if progress_callback: progress_callback(0, 100, "Process Canceled.")
                 print("\nProcess aborted by user.")
                 return
 
             if output_format in [".srt", ".vtt"]:
-                start_time = format_timestamp(segment.start, is_vtt)
-                end_time = format_timestamp(segment.end, is_vtt)
-                content += f"{index}\n"
-                content += f"{start_time} --> {end_time}\n"
-                content += f"{segment.text.strip()}\n\n"
+                if word_timestamps and segment.words:
+                    # Output individual words as their own subtitle block
+                    for word in segment.words:
+                        start_time = format_timestamp(word.start, is_vtt)
+                        end_time = format_timestamp(word.end, is_vtt)
+                        content += f"{subtitle_index}\n"
+                        content += f"{start_time} --> {end_time}\n"
+                        content += f"{word.word.strip()}\n\n"
+                        subtitle_index += 1
+                else:
+                    # Standard sentence-level subtitle block
+                    start_time = format_timestamp(segment.start, is_vtt)
+                    end_time = format_timestamp(segment.end, is_vtt)
+                    content += f"{subtitle_index}\n"
+                    content += f"{start_time} --> {end_time}\n"
+                    content += f"{segment.text.strip()}\n\n"
+                    subtitle_index += 1
             elif output_format == ".txt":
+                # Standard text ignores timestamps completely
                 content += f"{segment.text.strip()}\n"
 
             pbar.update(segment.end - pbar.n)
 
             if progress_callback:
-                percentage = round((segment.end / total_duration) * 100, 1)
+                percentage = min(100.0, round((segment.end / total_duration) * 100, 1))
                 action_text = "Translating" if task == "translate" else "Transcribing"
                 progress_callback(segment.end, total_duration, f"{action_text}... {percentage}%")
 
@@ -90,8 +127,6 @@ def translate_movie(video_path, source_language, output_file, model_size="large-
         base_name = os.path.splitext(video_path)[0]
         output_video = f"{base_name}_hardcoded.mp4"
 
-        # Windows path escaping for FFmpeg filters is notoriously tricky.
-        # We temporarily change the working directory to make the paths relative.
         original_cwd = os.getcwd()
         target_dir = os.path.dirname(os.path.abspath(output_file))
         sub_filename = os.path.basename(output_file)
@@ -105,7 +140,7 @@ def translate_movie(video_path, source_language, output_file, model_size="large-
                 "ffmpeg", "-y",
                 "-i", vid_filename,
                 "-vf", f"subtitles='{sub_filename}'",
-                "-c:a", "copy",  # Copy the audio exactly to save time and preserve quality
+                "-c:a", "copy",
                 out_vid_filename
             ]
 
