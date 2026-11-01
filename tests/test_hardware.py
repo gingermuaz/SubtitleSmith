@@ -20,7 +20,7 @@ class GpuDetectionTests(unittest.TestCase):
         with fake_nvidia_smi("0, NVIDIA GeForce RTX 3080, 10240\n1, NVIDIA GeForce RTX 3060, 12288\n"):
             self.assertEqual(len(hardware.get_nvidia_gpus()), 2)
             scan = hardware.scan_system()
-        self.assertEqual(scan["gpu_index"], 1)
+        self.assertEqual((scan["gpu_index"], scan["vram_gb"]), (1, 12))
         self.assertIn("RTX 3060 (12 GB VRAM) - used for processing", scan["report"])
         self.assertIn("RTX 3080 (10 GB VRAM)", scan["report"])
 
@@ -47,6 +47,9 @@ class RecommendationTests(unittest.TestCase):
             for task, code in hardware.recommend_models(has_gpu, vram, ram).items():
                 self.assertIn(code, ALL_MODELS)
                 self.assertIsNone(hardware.model_job_problem(code, task, "ja"), (vram, task, code))
+
+    def test_fast_mode_batch_sizes(self):
+        self.assertEqual([hardware.batch_size_for(gb) for gb in (0, 2, 4, 6, 8, 12, 24)], [0, 2, 4, 8, 8, 16, 16])
 
     def test_model_job_problem(self):
         problem = hardware.model_job_problem

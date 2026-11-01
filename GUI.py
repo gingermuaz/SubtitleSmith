@@ -16,10 +16,10 @@ if sys.stderr is None:
 import customtkinter as ctk
 from tkinterdnd2 import TkinterDnD, DND_FILES
 
-import burn
 import engine
 import hardware
 import languages
+import video
 
 # --- Configuration & Constants ---
 LANGUAGES = [
@@ -51,6 +51,9 @@ SUPPORTED_MEDIA = (
 
 AUTO_SAVE = "<Auto-save to original directories>"
 
+# Video menu label -> engine.process_file(video_output=...)
+VIDEO_OUTPUTS = {"Subtitles only": "none", "Add subtitle track": "track", "Burn into video": "burn"}
+
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
@@ -81,14 +84,14 @@ def model_label(code):
     return next(m for m in MODELS if model_code(m) == code)
 
 
-def output_path_for(video, save_val, fmt, total_files):
+def output_path_for(media_path, save_val, fmt, total_files):
     """Works out where one file's subtitles go."""
     if total_files == 1:
         return save_val
-    base_name = os.path.splitext(os.path.basename(video))[0]
+    base_name = os.path.splitext(os.path.basename(media_path))[0]
     if os.path.isdir(save_val):
         return os.path.join(save_val, f"{base_name}_subtitle{fmt}")
-    return os.path.join(os.path.dirname(video), f"{base_name}_subtitle{fmt}")
+    return os.path.join(os.path.dirname(media_path), f"{base_name}_subtitle{fmt}")
 
 
 class App:
@@ -102,6 +105,7 @@ class App:
         # Filled in by the hardware scan at startup; these defaults are used if the scan fails
         self.recommended_models = {"transcribe": "large-v3-turbo", "translate": "large-v3"}
         self.gpu_index = 0
+        self.vram_gb = 0
 
         self._setup_window()
         self._create_variables()
@@ -135,7 +139,8 @@ class App:
         self.compute_var = ctk.StringVar(value=COMPUTE_OPTIONS[0])
         self.vad_var = ctk.BooleanVar(value=True)
         self.theme_var = ctk.BooleanVar(value=False)
-        self.hardcode_var = ctk.BooleanVar(value=False)
+        self.video_output_var = ctk.StringVar(value="Subtitles only")
+        self.fast_mode_var = ctk.BooleanVar(value=True)
         self.readable_lines_var = ctk.BooleanVar(value=True)
         self.status_var = ctk.StringVar(value="Ready")
 
@@ -201,12 +206,14 @@ class App:
         ctk.CTkOptionMenu(adv_frame, variable=self.compute_var, values=COMPUTE_OPTIONS, width=150).pack(side="left",
                                                                                                        padx=(0, 15))
         ctk.CTkSwitch(adv_frame, text="VAD Filter", variable=self.vad_var).pack(side="left", padx=(0, 15))
+        ctk.CTkSwitch(adv_frame, text="Fast Mode", variable=self.fast_mode_var).pack(side="left")
 
         # 6. Advanced Settings Row 2
         adv2_frame = ctk.CTkFrame(frame, fg_color="transparent")
         adv2_frame.grid(row=6, column=0, columnspan=4, pady=(5, 5))
-        ctk.CTkSwitch(adv2_frame, text="Burn Subtitles to Video", variable=self.hardcode_var).pack(side="left",
-                                                                                                  padx=(0, 20))
+        ctk.CTkLabel(adv2_frame, text="Video:").pack(side="left", padx=(0, 5))
+        ctk.CTkOptionMenu(adv2_frame, variable=self.video_output_var, values=list(VIDEO_OUTPUTS),
+                          width=170).pack(side="left", padx=(0, 20))
         ctk.CTkSwitch(adv2_frame, text="Readable Lines", variable=self.readable_lines_var).pack(side="left",
                                                                                               padx=(0, 20))
         ctk.CTkSwitch(adv2_frame, text="Light UI", variable=self.theme_var, command=self.toggle_theme).pack(side="left")
@@ -241,6 +248,7 @@ class App:
             self.hw_textbox.insert("0.0", scan["report"])
             self.recommended_models = scan["recommended"]
             self.gpu_index = scan["gpu_index"]
+            self.vram_gb = scan["vram_gb"]
             self.model_var.set(model_label(self.recommended_models[self.current_task()]))
         except Exception as e:
             self.hw_textbox.insert("0.0", f"Could not perform hardware scan.\nError: {e}")
@@ -351,7 +359,7 @@ class App:
         task_code = self.current_task()
         compute_code = "cpu" if "CPU" in self.compute_var.get() else "auto"
         fmt = self.format_var.get()
-        hardcode = self.hardcode_var.get()
+        video_output = VIDEO_OUTPUTS[self.video_output_var.get()]
 
         # Catch a model that can't do this job before spending time on it
         problem = hardware.model_job_problem(model_sz, task_code, lang_code)
@@ -370,13 +378,16 @@ class App:
                 model_sz = better
 
         # Check for FFmpeg now rather than after a long transcription
-        if hardcode and fmt in (".srt", ".vtt") and not burn.ffmpeg_available():
+        if video_output != "none" and fmt in (".srt", ".vtt") and not video.ffmpeg_available():
             if not messagebox.askyesno(
                     "FFmpeg not found",
-                    "Burn Subtitles to Video is on, but FFmpeg isn't installed or isn't on your PATH.\n\n"
+                    "Adding subtitles to videos needs FFmpeg, which isn't installed or isn't on your PATH.\n\n"
                     "Continue and make subtitle files only?"):
                 return
-            hardcode = False
+            video_output = "none"
+
+        # Fast Mode: transcribe several pieces at once on the GPU, as many as its memory allows
+        batch_size = hardware.batch_size_for(self.vram_gb) if self.fast_mode_var.get() and compute_code != "cpu" else 0
 
         self.cancel_event.clear()
         self.start_button.configure(state="disabled")
@@ -386,14 +397,15 @@ class App:
         threading.Thread(
             target=self.run_queue,
             args=(self.selected_files.copy(), lang_code, self.save_path_var.get(), model_sz, task_code, compute_code,
-                  self.vad_var.get(), fmt, hardcode, self.readable_lines_var.get(), self.names_entry.get().strip()),
+                  self.vad_var.get(), fmt, video_output, self.readable_lines_var.get(),
+                  self.names_entry.get().strip(), batch_size),
             daemon=True
         ).start()
 
-    def run_queue(self, videos, lang_code, save_val, model_sz, task_type, compute, vad, fmt, hardcode,
-                  readable_lines, names_and_terms):
+    def run_queue(self, media_files, lang_code, save_val, model_sz, task_type, compute, vad, fmt, video_output,
+                  readable_lines, names_and_terms, batch_size=0):
         """Worker thread: processes each file in turn, then shows a summary."""
-        total_files = len(videos)
+        total_files = len(media_files)
         device_index = 0 if compute == "cpu" else self.gpu_index
         succeeded, failed, notes, detected = [], [], [], []
         cancelled = False
@@ -407,19 +419,19 @@ class App:
                 load_error = str(e) or type(e).__name__
                 return
 
-            for i, video in enumerate(videos):
+            for i, media in enumerate(media_files):
                 if self.check_cancel():
                     cancelled = True
                     break
-                name = os.path.basename(video)
+                name = os.path.basename(media)
                 self.batch_prefix = f"[{i + 1}/{total_files}] " if total_files > 1 else ""
                 try:
                     result = engine.process_file(
-                        media_path=video, output_file=output_path_for(video, save_val, fmt, total_files),
+                        media_path=media, output_file=output_path_for(media, save_val, fmt, total_files),
                         model_size=model_sz, source_language=lang_code, task=task_type,
                         compute_device=compute, device_index=device_index, vad_filter=vad,
                         output_format=fmt, readable_lines=readable_lines, names_and_terms=names_and_terms,
-                        hardcode_subtitles=hardcode,
+                        video_output=video_output, batch_size=batch_size,
                         progress_callback=self.update_gui_progress, cancel_check=self.check_cancel
                     )
                 except engine.ProcessCancelled:

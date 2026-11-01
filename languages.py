@@ -21,6 +21,23 @@ NAMES = {
     "ba": "Bashkir", "jw": "Javanese", "su": "Sundanese", "yue": "Cantonese",
 }
 
+# 3-letter ISO 639-2 codes, which video files use to label subtitle tracks (bibliographic form, as MKV uses)
+_ISO639_2 = {
+    "en": "eng", "zh": "chi", "de": "ger", "es": "spa", "ru": "rus", "ko": "kor", "fr": "fre", "ja": "jpn",
+    "pt": "por", "tr": "tur", "pl": "pol", "ca": "cat", "nl": "dut", "ar": "ara", "sv": "swe", "it": "ita",
+    "id": "ind", "hi": "hin", "fi": "fin", "vi": "vie", "he": "heb", "uk": "ukr", "el": "gre", "ms": "may",
+    "cs": "cze", "ro": "rum", "da": "dan", "hu": "hun", "ta": "tam", "no": "nor", "th": "tha", "ur": "urd",
+    "hr": "hrv", "bg": "bul", "lt": "lit", "la": "lat", "mi": "mao", "ml": "mal", "cy": "wel", "sk": "slo",
+    "te": "tel", "fa": "per", "lv": "lav", "bn": "ben", "sr": "srp", "az": "aze", "sl": "slv", "kn": "kan",
+    "et": "est", "mk": "mac", "br": "bre", "eu": "baq", "is": "ice", "hy": "arm", "ne": "nep", "mn": "mon",
+    "bs": "bos", "kk": "kaz", "sq": "alb", "sw": "swa", "gl": "glg", "mr": "mar", "pa": "pan", "si": "sin",
+    "km": "khm", "sn": "sna", "yo": "yor", "so": "som", "af": "afr", "oc": "oci", "ka": "geo", "be": "bel",
+    "tg": "tgk", "sd": "snd", "gu": "guj", "am": "amh", "yi": "yid", "lo": "lao", "uz": "uzb", "fo": "fao",
+    "ht": "hat", "ps": "pus", "tk": "tuk", "nn": "nno", "mt": "mlt", "sa": "san", "lb": "ltz", "my": "bur",
+    "bo": "tib", "tl": "tgl", "mg": "mlg", "as": "asm", "tt": "tat", "haw": "haw", "ln": "lin", "ha": "hau",
+    "ba": "bak", "jw": "jav", "su": "sun", "yue": "chi",  # ISO 639-2 has no Cantonese; Chinese is closest
+}
+
 # Characters per subtitle line. Languages written without spaces between words get shorter lines.
 DEFAULT_LINE_LENGTH = 42
 _LINE_LENGTHS = {"ja": 13, "zh": 16, "yue": 16, "ko": 16}
@@ -39,3 +56,8 @@ def line_length(code):
 def describe(code, probability):
     """'ja', 0.97 -> 'Japanese (97%)'"""
     return f"{name(code)} ({probability:.0%})"
+
+
+def iso639_2(code):
+    """'ja' -> 'jpn', for labelling subtitle tracks ('und' = undetermined, if unknown)."""
+    return _ISO639_2.get(code, "und")

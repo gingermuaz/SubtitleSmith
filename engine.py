@@ -1,7 +1,7 @@
 """The speech-to-text engine: loads faster-whisper models and turns one media file into subtitles.
 
-process_file() is the entry point. It runs transcribe(), saves the result with writers.py
-and, if asked, burns it into a copy of the video with burn.py.
+process_file() is the entry point. It runs transcribe(), saves the result with writers.py and,
+if asked, adds it to a copy of the video with video.py (as a subtitle track, or burned in).
 """
 import os
 import sys
@@ -35,10 +35,10 @@ if hasattr(os, 'add_dll_directory'):
         os.add_dll_directory(_folder)
 # ----------------------------------------
 
-from faster_whisper import WhisperModel
+from faster_whisper import BatchedInferencePipeline, WhisperModel
 
-import burn
 import languages
+import video
 import writers
 from errors import ProcessCancelled  # GUI.py catches this as engine.ProcessCancelled
 
@@ -74,11 +74,28 @@ def get_model(model_size, compute_device="auto", device_index=0, progress_callba
 
 
 def transcribe(media_path, model, source_language="auto", task="translate", vad_filter=True,
-               names_and_terms="", progress_callback=None, cancel_check=None):
+               names_and_terms="", batch_size=0, progress_callback=None, cancel_check=None):
     """Runs the model over one file. Returns (segments, info); info.language is the spoken language.
 
-    Raises ProcessCancelled if cancel_check() becomes true part-way through.
+    batch_size > 1 turns on Fast Mode (it needs vad_filter). If the GPU runs out of memory, the
+    batch size is halved and the file starts again. Raises ProcessCancelled if cancel_check()
+    becomes true part-way through.
     """
+    while True:
+        try:
+            return _transcribe_once(media_path, model, source_language, task, vad_filter, names_and_terms,
+                                    batch_size, progress_callback, cancel_check)
+        except RuntimeError as e:
+            if batch_size <= 1 or "out of memory" not in str(e).lower():
+                raise
+            batch_size //= 2
+            gc.collect()
+            if progress_callback:
+                progress_callback(0, 100, f"Out of GPU memory, starting again with smaller batches ({batch_size})...")
+
+
+def _transcribe_once(media_path, model, source_language, task, vad_filter, names_and_terms, batch_size,
+                     progress_callback, cancel_check):
     if progress_callback: progress_callback(0, 100, "Extracting audio and analyzing...")
 
     lang_param = None if source_language == "auto" else source_language
@@ -86,23 +103,32 @@ def transcribe(media_path, model, source_language="auto", task="translate", vad_
     # Advanced tuning for VHS static and noisy background audio
     vad_params = dict(min_silence_duration_ms=500, speech_pad_ms=400) if vad_filter else None
 
-    segments, info = model.transcribe(
-        media_path,
+    options = dict(
         task=task,
         language=lang_param,
-        beam_size=10,
         best_of=5,
         temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
         # Names & terms to spell correctly; faster-whisper adds them to every 30-second window
         hotwords=(names_and_terms or "").strip() or None,
-        # Stop repeated lines on long films: don't feed each window the previous window's text
-        # (so one mistake can't loop), and skip long silences where Whisper tends to invent text
-        condition_on_previous_text=False,
-        hallucination_silence_threshold=2.0,
-        vad_filter=vad_filter,
         vad_parameters=vad_params,
-        word_timestamps=True  # needed by hallucination_silence_threshold and readable line splitting
+        word_timestamps=True,  # for readable line splitting (and the silence check below)
     )
+    if batch_size > 1 and vad_filter:
+        # Fast Mode: faster-whisper cuts the audio at pauses and transcribes batch_size pieces at once.
+        # In this mode it never carries text between pieces, doesn't retry at higher temperatures and
+        # has no silence check. Beam size 5 (faster-whisper's default) keeps the batches within VRAM.
+        segments, info = BatchedInferencePipeline(model=model).transcribe(
+            media_path, beam_size=5, batch_size=batch_size, vad_filter=True,
+            without_timestamps=False,  # timings inside each piece, so segments end at natural breaks
+            **options)
+    else:
+        segments, info = model.transcribe(
+            media_path, beam_size=10, vad_filter=vad_filter,
+            # Stop repeated lines on long films: don't feed each window the previous window's text
+            # (so one mistake can't loop), and skip long silences where Whisper tends to invent text
+            condition_on_previous_text=False,
+            hallucination_silence_threshold=2.0,
+            **options)
     total_duration = round(info.duration, 2)
     spoken = languages.name(info.language)
     action_text = f"Translating from {spoken}" if task == "translate" else f"Transcribing {spoken}"
@@ -122,17 +148,22 @@ def transcribe(media_path, model, source_language="auto", task="translate", vad_
 
 def process_file(media_path, output_file, model_size="large-v3", source_language="auto", task="translate",
                  compute_device="auto", device_index=0, vad_filter=True, output_format=".srt",
-                 readable_lines=True, names_and_terms="", hardcode_subtitles=False,
+                 readable_lines=True, names_and_terms="", video_output="none", batch_size=0,
                  progress_callback=None, cancel_check=None):
-    """Makes subtitles for one media file and, if asked, burns them into a copy of the video.
+    """Makes subtitles for one media file and, if asked, adds them to a copy of the video.
+
+    video_output: "none", "track" (a subtitle track viewers can switch on and off) or "burn" (drawn
+    into the picture). batch_size > 1 turns on Fast Mode (see transcribe).
 
     Returns {"subtitle_file", "video_file", "notes", "language", "language_probability",
     "language_detected"}. Raises ProcessCancelled if the user cancels, and ProcessingError
     (or faster-whisper's own errors) if something goes wrong.
     """
+    if video_output not in ("none", "track", "burn"):
+        raise ValueError(f"Unknown video output: {video_output}")
     model = get_model(model_size, compute_device, device_index, progress_callback)
     segments, info = transcribe(media_path, model, source_language, task, vad_filter, names_and_terms,
-                                progress_callback, cancel_check)
+                                batch_size, progress_callback, cancel_check)
 
     if progress_callback: progress_callback(100, 100, "Saving text file...")
     # Translations come out in English; otherwise the subtitles are in the spoken language
@@ -145,14 +176,20 @@ def process_file(media_path, output_file, model_size="large-v3", source_language
         result["notes"].append(f"Not sure which language this is (best guess {languages.describe(info.language, info.language_probability)}). "
                                "If the subtitles look wrong, choose the Source Language yourself.")
 
-    if hardcode_subtitles:
+    if video_output != "none":
         if output_format not in (".srt", ".vtt"):
-            result["notes"].append("Burn-in skipped: .txt files have no timings to burn in.")
-        elif not burn.can_burn(media_path):
-            result["notes"].append("Burn-in skipped: only MP4, MKV, AVI and MOV videos are supported.")
+            result["notes"].append("Video skipped: .txt files have no timings to add to a video.")
+        elif not video.is_supported_video(media_path):
+            result["notes"].append("Video skipped: only MP4, MKV, AVI and MOV videos are supported.")
+        elif video_output == "track":
+            if progress_callback: progress_callback(100, 100, "Adding the subtitle track to the video...")
+            result["video_file"] = video.add_subtitle_track(media_path, output_file, subtitle_language)
         else:
             if progress_callback: progress_callback(100, 100, "Burning subtitles to video... (This takes a while)")
-            result["video_file"] = burn.burn_subtitles(media_path, output_file)
+            result["video_file"], used_gpu = video.burn_subtitles(media_path, output_file)
+            if not used_gpu:
+                result["notes"].append("Burned in with the CPU encoder, because FFmpeg couldn't use the NVIDIA "
+                                       "encoder (NVENC). It works, just more slowly.")
 
     if progress_callback: progress_callback(100, 100, "Success! File saved.")
     return result

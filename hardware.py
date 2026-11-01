@@ -75,6 +75,23 @@ def recommend_models(has_gpu, vram_gb, ram_gb):
     return {"transcribe": "tiny", "translate": "tiny"}
 
 
+def batch_size_for(vram_gb):
+    """How many 30-second pieces Fast Mode transcribes at once (0 = Fast Mode off).
+
+    Bigger batches are faster but use more VRAM. If a batch still runs out of memory,
+    engine.transcribe halves it and tries again.
+    """
+    if vram_gb >= 12:
+        return 16
+    if vram_gb >= 6:
+        return 8
+    if vram_gb >= 4:
+        return 4
+    if vram_gb >= 2:
+        return 2
+    return 0
+
+
 def get_nvidia_gpus():
     """Returns [(index, name, vram_mb), ...] for every NVIDIA GPU, or [] if there are none."""
     kwargs = {'encoding': 'utf-8'}
@@ -97,7 +114,7 @@ def get_nvidia_gpus():
 
 
 def scan_system():
-    """Returns {"report": text, "recommended": {task: model_code}, "gpu_index": int}."""
+    """Returns {"report": text, "recommended": {task: model_code}, "gpu_index": int, "vram_gb": int}."""
     cpu_name = get_clean_cpu_name()
     cores = psutil.cpu_count(logical=False) or "Unknown"
     threads = psutil.cpu_count(logical=True) or "Unknown"
@@ -136,4 +153,4 @@ def scan_system():
         f"GPU: {gpu_display}\n\n"
         f"{rec_line}"
     )
-    return {"report": report_text, "recommended": recommended, "gpu_index": gpu_index}
+    return {"report": report_text, "recommended": recommended, "gpu_index": gpu_index, "vram_gb": vram_gb}
