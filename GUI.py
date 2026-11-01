@@ -1,4 +1,5 @@
 import os
+import shutil
 import threading
 import ctypes
 import platform
@@ -25,8 +26,8 @@ MODELS = [
     "base (Fast / Basic Accuracy)",
     "small (Balanced)",
     "medium (Slower / High Accuracy)",
-    "distil-large-v3 (6x Faster / High Accuracy)",
-    "large-v3-turbo (3x Faster / High Accuracy)",
+    "distil-large-v3 (6x Faster / English Only)",
+    "large-v3-turbo (3x Faster / No Translation)",
     "large-v3 (Slowest / Best Accuracy)"
 ]
 
@@ -46,6 +47,10 @@ cancel_event = threading.Event()
 selected_files = []
 batch_prefix = ""
 
+# Filled in by the hardware scan at startup; these defaults are used if the scan fails
+recommended_models = {"transcribe": "large-v3-turbo", "translate": "large-v3"}
+gpu_index = 0
+
 
 def set_title_bar_dark(window):
     if platform.system() == "Windows":
@@ -60,6 +65,32 @@ def set_title_bar_dark(window):
 def toggle_theme():
     mode = "light" if theme_var.get() else "dark"
     ctk.set_appearance_mode(mode)
+
+
+def model_code(label):
+    """'large-v3 (Slowest / Best Accuracy)' -> 'large-v3'"""
+    return label.split(" ")[0].lower()
+
+
+def model_label(code):
+    """'large-v3' -> the full label shown in the AI Model menu"""
+    return next(m for m in MODELS if model_code(m) == code)
+
+
+def current_task():
+    return "translate" if "Translate" in task_var.get() else "transcribe"
+
+
+def on_task_change(value=None):
+    """Keeps the AI model suitable when switching between Translate and Keep Original."""
+    task = current_task()
+    current = model_code(model_var.get())
+    if current in recommended_models.values():
+        # Still on an auto-pick, so move to the auto-pick for this job
+        model_var.set(model_label(recommended_models[task]))
+    elif task == "translate" and current in hardware.NO_TRANSLATION:
+        model_var.set(model_label(recommended_models["translate"]))
+        status_var.set(f"Switched AI model to '{recommended_models['translate']}': '{current}' can't translate.")
 
 
 def browse_video(event=None):
@@ -139,43 +170,90 @@ def cancel_process():
     cancel_button.configure(state="disabled")
 
 
+def output_path_for(video, save_val, fmt, total_files):
+    """Works out where one file's subtitles go."""
+    if total_files == 1:
+        return save_val
+    base_name = os.path.splitext(os.path.basename(video))[0]
+    if os.path.isdir(save_val):
+        return os.path.join(save_val, f"{base_name}_subtitle{fmt}")
+    return os.path.join(os.path.dirname(video), f"{base_name}_subtitle{fmt}")
+
+
+def show_summary(total, succeeded, failed, notes, cancelled, load_error):
+    """Runs on the main thread once the queue finishes."""
+    if load_error:
+        status_var.set("Couldn't load the AI model.")
+        progress_bar.set(0)
+        messagebox.showerror("Couldn't load the AI model", load_error)
+        return
+
+    if cancelled:
+        status_var.set(f"Canceled. {len(succeeded)} of {total} file(s) finished.")
+    elif failed:
+        status_var.set(f"Finished with errors: {len(succeeded)} of {total} file(s) succeeded, {len(failed)} failed.")
+    else:
+        status_var.set(f"Successfully processed {total} file(s).")
+        progress_bar.set(1.0)
+
+    lines = [f"{len(succeeded)} of {total} file(s) processed."]
+    if failed:
+        lines += ["", f"Failed ({len(failed)}):"]
+        lines += [f"\u2022 {name}: {error[:300]}" for name, error in failed[:10]]
+        if len(failed) > 10: lines.append(f"...and {len(failed) - 10} more.")
+    if notes:
+        lines += ["", "Notes:"]
+        lines += [f"\u2022 {note}" for note in notes[:10]]
+        if len(notes) > 10: lines.append(f"...and {len(notes) - 10} more.")
+
+    if failed:
+        messagebox.showwarning("Finished with errors", "\n".join(lines))
+    elif notes or (total > 1 and not cancelled):
+        messagebox.showinfo("Finished", "\n".join(lines))
+
+
 def run_translation_thread(videos, lang_code, save_val, model_sz, task_type, compute, vad, fmt, hardcode, word_ts):
     global batch_prefix
     total_files = len(videos)
+    device_index = 0 if compute == "cpu" else gpu_index
+    succeeded, failed, notes = [], [], []
+    cancelled = False
+    load_error = None
 
     try:
+        # Load the model once for the whole queue. If it won't load, every file would fail the same way.
+        try:
+            main.get_model(model_sz, compute, device_index, update_gui_progress)
+        except Exception as e:
+            load_error = str(e) or type(e).__name__
+            return
+
         for i, video in enumerate(videos):
-            if check_cancel(): break
-
-            if total_files > 1:
-                batch_prefix = f"[{i + 1}/{total_files}] "
-                base_name = os.path.splitext(os.path.basename(video))[0]
-
-                if save_val == "<Auto-save to original directories>":
-                    out_path = os.path.join(os.path.dirname(video), f"{base_name}_subtitle{fmt}")
-                elif os.path.isdir(save_val):
-                    out_path = os.path.join(save_val, f"{base_name}_subtitle{fmt}")
-                else:
-                    out_path = os.path.join(os.path.dirname(video), f"{base_name}_subtitle{fmt}")
-            else:
-                batch_prefix = ""
-                out_path = save_val
-
-            main.translate_movie(
-                video_path=video, source_language=lang_code, output_file=out_path,
-                model_size=model_sz, task=task_type, compute_device=compute,
-                vad_filter=vad, output_format=fmt, hardcode_subtitles=hardcode,
-                word_timestamps=word_ts, progress_callback=update_gui_progress, cancel_check=check_cancel
-            )
-
-        if not check_cancel():
-            root.after(0, lambda: status_var.set(f"Successfully processed {total_files} file(s)."))
-            root.after(0, lambda: progress_bar.set(1.0))
-
-    except Exception as e:
-        update_gui_progress(0, 100, f"Error: {str(e)}")
+            if check_cancel():
+                cancelled = True
+                break
+            name = os.path.basename(video)
+            batch_prefix = f"[{i + 1}/{total_files}] " if total_files > 1 else ""
+            try:
+                result = main.translate_movie(
+                    video_path=video, source_language=lang_code,
+                    output_file=output_path_for(video, save_val, fmt, total_files),
+                    model_size=model_sz, task=task_type, compute_device=compute, device_index=device_index,
+                    vad_filter=vad, output_format=fmt, hardcode_subtitles=hardcode,
+                    word_timestamps=word_ts, progress_callback=update_gui_progress, cancel_check=check_cancel
+                )
+            except main.ProcessCancelled:
+                cancelled = True
+                break
+            except Exception as e:
+                # Note the failure and carry on with the rest of the queue
+                failed.append((name, str(e) or type(e).__name__))
+                continue
+            succeeded.append(name)
+            notes += [f"{name}: {note}" for note in result["notes"]]
     finally:
         batch_prefix = ""
+        root.after(0, lambda: show_summary(total_files, succeeded, failed, notes, cancelled, load_error))
         root.after(0, lambda: start_button.configure(state="normal"))
         root.after(0, lambda: cancel_button.configure(state="disabled"))
 
@@ -186,9 +264,36 @@ def start_process():
         return
 
     lang_code = lang_var.get().split("(")[-1].replace(")", "")
-    model_code = model_var.get().split(" ")[0].lower()
-    task_code = "translate" if "Translate" in task_var.get() else "transcribe"
+    model_sz = model_code(model_var.get())
+    task_code = current_task()
     compute_code = "cpu" if "CPU" in compute_var.get() else "auto"
+    fmt = format_var.get()
+    hardcode = hardcode_var.get()
+
+    # Catch a model that can't do this job before spending time on it
+    problem = hardware.model_job_problem(model_sz, task_code, lang_code)
+    if problem:
+        better = recommended_models[task_code]
+        if hardware.model_job_problem(better, task_code, lang_code):
+            better = "large-v3"
+        answer = messagebox.askyesnocancel(
+            "AI model can't do this job",
+            f"{problem}\n\nSwitch to '{better}' for this job?\n\n"
+            f"Yes: switch and start\nNo: start with '{model_sz}' anyway\nCancel: go back")
+        if answer is None:
+            return
+        if answer:
+            model_var.set(model_label(better))
+            model_sz = better
+
+    # Check for FFmpeg now rather than after a long transcription
+    if hardcode and fmt in (".srt", ".vtt") and not shutil.which("ffmpeg"):
+        if not messagebox.askyesno(
+                "FFmpeg not found",
+                "Burn Subtitles to Video is on, but FFmpeg isn't installed or isn't on your PATH.\n\n"
+                "Continue and make subtitle files only?"):
+            return
+        hardcode = False
 
     cancel_event.clear()
     start_button.configure(state="disabled")
@@ -197,8 +302,8 @@ def start_process():
 
     threading.Thread(
         target=run_translation_thread,
-        args=(selected_files.copy(), lang_code, save_path_var.get(), model_code, task_code, compute_code, vad_var.get(),
-              format_var.get(), hardcode_var.get(), word_timestamps_var.get()),
+        args=(selected_files.copy(), lang_code, save_path_var.get(), model_sz, task_code, compute_code, vad_var.get(),
+              fmt, hardcode, word_timestamps_var.get()),
         daemon=True
     ).start()
 
@@ -217,7 +322,7 @@ if __name__ == "__main__":
 
     video_path_var = ctk.StringVar()
     save_path_var = ctk.StringVar()
-    lang_var = ctk.StringVar(value=LANGUAGES[-2])
+    lang_var = ctk.StringVar(value="Auto-Detect (auto)")
     model_var = ctk.StringVar(value=MODELS[-1])
     task_var = ctk.StringVar(value="Translate to English")
     format_var = ctk.StringVar(value=".srt")
@@ -265,7 +370,7 @@ if __name__ == "__main__":
     action_frame.grid(row=3, column=0, columnspan=4, pady=10)
     ctk.CTkLabel(action_frame, text="Action:").pack(side="left", padx=10)
     ctk.CTkSegmentedButton(action_frame, variable=task_var, values=["Translate to English", "Keep Original Language"],
-                           width=320).pack(side="left", padx=10)
+                           command=on_task_change, width=320).pack(side="left", padx=10)
 
     # 4. Advanced Settings Row 1
     adv_frame = ctk.CTkFrame(frame, fg_color="transparent")
@@ -309,9 +414,11 @@ if __name__ == "__main__":
     hw_textbox.pack()
 
     try:
-        report, recommended_model = hardware.scan_system()
-        hw_textbox.insert("0.0", report)
-        model_var.set(recommended_model)
+        scan = hardware.scan_system()
+        hw_textbox.insert("0.0", scan["report"])
+        recommended_models = scan["recommended"]
+        gpu_index = scan["gpu_index"]
+        model_var.set(model_label(recommended_models[current_task()]))
     except Exception as e:
         hw_textbox.insert("0.0", f"Could not perform hardware scan.\nError: {e}")
     hw_textbox.configure(state="disabled")

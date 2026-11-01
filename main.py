@@ -1,7 +1,14 @@
 import os
 import sys
+import gc
 import subprocess
 import shutil
+import tempfile
+
+# Number GPUs the same way nvidia-smi does, so the GPU the hardware scan picks is the one
+# the model loads onto. Must be set before CUDA starts up.
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
 from faster_whisper import WhisperModel
 from tqdm import tqdm
 import warnings
@@ -32,20 +39,96 @@ def format_timestamp(seconds: float, is_vtt=False):
     return f"{hours:02d}:{minutes:02d}:{secs:02d}{separator}{millis:03d}"
 
 
-def translate_movie(video_path, source_language, output_file, model_size="large-v3", task="translate",
-                    compute_device="auto", vad_filter=True, output_format=".srt", hardcode_subtitles=False,
-                    word_timestamps=False, progress_callback=None, cancel_check=None):
-    # Map UI strings to HuggingFace repositories for the new optimized models
-    MODEL_MAPPINGS = {
-        "distil-large-v3": "Systran/faster-distil-whisper-large-v3",
-        "large-v3-turbo": "deepdml/faster-whisper-large-v3-turbo-ct2",
-    }
-    actual_model = MODEL_MAPPINGS.get(model_size, model_size)
+# Map UI names to HuggingFace repositories for the optimized models
+MODEL_MAPPINGS = {
+    "distil-large-v3": "Systran/faster-distil-whisper-large-v3",
+    "large-v3-turbo": "deepdml/faster-whisper-large-v3-turbo-ct2",
+}
+
+VIDEO_EXTS = ('.mp4', '.mkv', '.avi', '.mov')
+
+
+class ProcessingError(Exception):
+    """A problem with one file, worded for the user."""
+
+
+class ProcessCancelled(Exception):
+    """The user pressed Cancel."""
+
+
+_loaded = {"key": None, "model": None}
+
+
+def get_model(model_size, compute_device="auto", device_index=0, progress_callback=None):
+    """Loads a model once and reuses it until the model or device changes."""
+    key = (model_size, compute_device, device_index)
+    if _loaded["key"] == key:
+        return _loaded["model"]
+
+    # Drop the old model first so two large models never sit in VRAM at once
+    _loaded["key"] = None
+    _loaded["model"] = None
+    gc.collect()
 
     if progress_callback: progress_callback(0, 100, f"Loading '{model_size}' model onto {compute_device.upper()}...")
-
     c_type = "int8" if compute_device == "cpu" else "int8_float16"
-    model = WhisperModel(actual_model, device=compute_device, compute_type=c_type)
+    model = WhisperModel(MODEL_MAPPINGS.get(model_size, model_size), device=compute_device,
+                         device_index=device_index, compute_type=c_type)
+    _loaded["key"] = key
+    _loaded["model"] = model
+    return model
+
+
+def burn_subtitles(video_path, subtitle_file):
+    """Re-encodes the video with the subtitles drawn on. Returns the new video's path."""
+    if not shutil.which("ffmpeg"):
+        raise ProcessingError("Subtitles saved, but FFmpeg isn't installed, so they couldn't be burned in.")
+
+    video_path = os.path.abspath(video_path)
+    subtitle_file = os.path.abspath(subtitle_file)
+    stem = os.path.splitext(os.path.basename(video_path))[0]
+    output_video = os.path.join(os.path.dirname(subtitle_file), f"{stem}_hardcoded.mp4")
+    partial_video = os.path.join(os.path.dirname(subtitle_file), f"{stem}_hardcoded.partial.mp4")
+
+    # FFmpeg's subtitles filter treats ' , : [ ] \ as special, and Windows paths always contain : and \.
+    # Rather than escape them, copy the subtitles to a plain name in a temp folder and run FFmpeg there.
+    # The video paths are normal arguments, so they need no escaping.
+    with tempfile.TemporaryDirectory() as temp_dir:
+        sub_name = "subtitles" + os.path.splitext(subtitle_file)[1]
+        shutil.copyfile(subtitle_file, os.path.join(temp_dir, sub_name))
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", video_path,
+            "-vf", f"subtitles={sub_name}",
+            "-c:a", "copy",
+            partial_video
+        ]
+        creationflags = 0x08000000 if os.name == 'nt' else 0
+        process = subprocess.run(ffmpeg_cmd, cwd=temp_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 creationflags=creationflags)
+
+    if process.returncode != 0:
+        # Remove our half-written file; any earlier finished video is left untouched
+        if os.path.exists(partial_video):
+            os.remove(partial_video)
+        lines = [line.strip() for line in process.stderr.decode('utf-8', errors='replace').splitlines()
+                 if line.strip() and line.strip() != "Conversion failed!"]
+        detail = " ".join(lines[-2:]) if lines else f"FFmpeg exit code {process.returncode}"
+        raise ProcessingError(f"Subtitles saved, but burning them into the video failed: {detail}")
+
+    os.replace(partial_video, output_video)
+    return output_video
+
+
+def translate_movie(video_path, source_language, output_file, model_size="large-v3", task="translate",
+                    compute_device="auto", vad_filter=True, output_format=".srt", hardcode_subtitles=False,
+                    word_timestamps=False, device_index=0, progress_callback=None, cancel_check=None):
+    """Makes subtitles for one media file.
+
+    Returns {"subtitle_file", "video_file", "notes"}. Raises ProcessCancelled if the user cancels,
+    and ProcessingError (or faster-whisper's own errors) if something goes wrong.
+    """
+    model = get_model(model_size, compute_device, device_index, progress_callback)
 
     if progress_callback: progress_callback(0, 100, "Extracting audio and analyzing...")
 
@@ -78,8 +161,7 @@ def translate_movie(video_path, source_language, output_file, model_size="large-
         for segment in segments:
             if cancel_check and cancel_check():
                 if progress_callback: progress_callback(0, 100, "Process Canceled.")
-                print("\nProcess aborted by user.")
-                return
+                raise ProcessCancelled()
 
             if output_format in [".srt", ".vtt"]:
                 if word_timestamps and segment.words:
@@ -115,50 +197,20 @@ def translate_movie(video_path, source_language, output_file, model_size="large-
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(content)
 
+    result = {"subtitle_file": output_file, "video_file": None, "notes": []}
+
     # --- PHASE 3: HARDCODE SUBTITLES ---
-    if hardcode_subtitles and output_format in [".srt", ".vtt"] and video_path.lower().endswith(
-            ('.mp4', '.mkv', '.avi', '.mov')):
-        if not shutil.which("ffmpeg"):
-            if progress_callback: progress_callback(100, 100, "Error: FFmpeg not found on system.")
-            return
+    if hardcode_subtitles:
+        if output_format not in (".srt", ".vtt"):
+            result["notes"].append("Burn-in skipped: .txt files have no timings to burn in.")
+        elif not video_path.lower().endswith(VIDEO_EXTS):
+            result["notes"].append("Burn-in skipped: only MP4, MKV, AVI and MOV videos are supported.")
+        else:
+            if progress_callback: progress_callback(100, 100, "Burning subtitles to video... (This takes a while)")
+            result["video_file"] = burn_subtitles(video_path, output_file)
 
-        if progress_callback: progress_callback(100, 100, "Burning subtitles to video... (This takes a while)")
-
-        base_name = os.path.splitext(video_path)[0]
-        output_video = f"{base_name}_hardcoded.mp4"
-
-        original_cwd = os.getcwd()
-        target_dir = os.path.dirname(os.path.abspath(output_file))
-        sub_filename = os.path.basename(output_file)
-        vid_filename = os.path.basename(video_path)
-        out_vid_filename = os.path.basename(output_video)
-
-        try:
-            os.chdir(target_dir)
-
-            ffmpeg_cmd = [
-                "ffmpeg", "-y",
-                "-i", vid_filename,
-                "-vf", f"subtitles='{sub_filename}'",
-                "-c:a", "copy",
-                out_vid_filename
-            ]
-
-            creationflags = 0x08000000 if os.name == 'nt' else 0
-            process = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     creationflags=creationflags)
-
-            if process.returncode == 0:
-                if progress_callback: progress_callback(100, 100, "Success! Subtitles hardcoded and saved.")
-            else:
-                if progress_callback: progress_callback(100, 100, "Error during video encoding. Check console.")
-                print(process.stderr.decode('utf-8'))
-        except Exception as e:
-            if progress_callback: progress_callback(100, 100, f"Encoding error: {e}")
-        finally:
-            os.chdir(original_cwd)
-    else:
-        if progress_callback: progress_callback(100, 100, "Success! File saved.")
+    if progress_callback: progress_callback(100, 100, "Success! File saved.")
+    return result
 
 
 if __name__ == "__main__":

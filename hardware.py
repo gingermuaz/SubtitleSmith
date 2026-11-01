@@ -6,6 +6,10 @@ import platform
 IS_WINDOWS = platform.system() == "Windows"
 CREATE_NO_WINDOW = 0x08000000 if IS_WINDOWS else 0
 
+# Models that can't do every job (codes match the start of each label in GUI.MODELS)
+NO_TRANSLATION = {"large-v3-turbo", "distil-large-v3"}  # can't translate to English
+ENGLISH_ONLY = {"distil-large-v3"}  # only understands English audio
+
 def get_clean_cpu_name():
     if IS_WINDOWS:
         try:
@@ -44,7 +48,56 @@ def get_advanced_ram_info(fallback_gb):
             pass
     return f"{fallback_gb} GB"
 
+def model_job_problem(model_code, task, lang_code):
+    """Returns why a model can't do this job, or None if it can."""
+    if task == "translate" and lang_code != "en" and model_code in NO_TRANSLATION:
+        if model_code in ENGLISH_ONLY:
+            return f"'{model_code}' only understands English audio, so it can't translate."
+        return f"'{model_code}' wasn't trained to translate, so it returns the original language."
+    if model_code in ENGLISH_ONLY and lang_code not in ("en", "auto"):
+        return f"'{model_code}' only understands English audio."
+    return None
+
+
+def recommend_models(has_gpu, vram_gb, ram_gb):
+    """Picks the best model this PC can run for each job: {"transcribe": code, "translate": code}."""
+    if has_gpu:
+        if vram_gb >= 8:
+            return {"transcribe": "large-v3-turbo", "translate": "large-v3"}
+        if vram_gb >= 6:
+            # turbo is about the same size as distil-large-v3 (the old 6GB pick) but handles every language
+            return {"transcribe": "large-v3-turbo", "translate": "medium"}
+        if vram_gb >= 4:
+            return {"transcribe": "small", "translate": "small"}
+        return {"transcribe": "base", "translate": "base"}
+    if ram_gb >= 16:
+        return {"transcribe": "base", "translate": "base"}
+    return {"transcribe": "tiny", "translate": "tiny"}
+
+
+def get_nvidia_gpus():
+    """Returns [(index, name, vram_mb), ...] for every NVIDIA GPU, or [] if there are none."""
+    kwargs = {'encoding': 'utf-8'}
+    if IS_WINDOWS: kwargs['creationflags'] = CREATE_NO_WINDOW
+    try:
+        output = subprocess.check_output(
+            ['nvidia-smi', '--query-gpu=index,name,memory.total', '--format=csv,noheader,nounits'], **kwargs)
+    except Exception:
+        return []
+
+    gpus = []
+    for line in output.strip().splitlines():  # nvidia-smi prints one line per GPU
+        try:
+            index, rest = line.split(',', 1)
+            name, vram_mb = rest.rsplit(',', 1)  # rsplit in case a GPU name ever contains a comma
+            gpus.append((int(index), name.strip(), int(float(vram_mb))))
+        except ValueError:
+            continue  # skip a line we can't read instead of losing every GPU
+    return gpus
+
+
 def scan_system():
+    """Returns {"report": text, "recommended": {task: model_code}, "gpu_index": int}."""
     cpu_name = get_clean_cpu_name()
     cores = psutil.cpu_count(logical=False) or "Unknown"
     threads = psutil.cpu_count(logical=True) or "Unknown"
@@ -54,43 +107,33 @@ def scan_system():
     ram_gb = round(ram_bytes / (1024 ** 3))
     ram_display = get_advanced_ram_info(ram_gb)
 
-    gpu_name = "No NVIDIA GPU detected"
-    vram_gb = 0
-    has_gpu = False
+    gpus = get_nvidia_gpus()
+    if gpus:
+        # Use the GPU with the most VRAM (main.py makes CUDA number GPUs the same way nvidia-smi does)
+        gpu_index, gpu_name, vram_mb = max(gpus, key=lambda gpu: gpu[2])
+        vram_gb = round(vram_mb / 1024)
+        gpu_display = f"{gpu_name} ({vram_gb} GB VRAM)"
+        if len(gpus) > 1:
+            gpu_display += " - used for processing"
+            for index, name, mb in gpus:
+                if index != gpu_index:
+                    gpu_display += f"\nGPU: {name} ({round(mb / 1024)} GB VRAM)"
+    else:
+        gpu_index, vram_gb = 0, 0
+        gpu_display = "No NVIDIA GPU detected (0 GB VRAM)"
 
-    try:
-        subprocess_kwargs = {'encoding': 'utf-8'}
-        if IS_WINDOWS: subprocess_kwargs['creationflags'] = CREATE_NO_WINDOW
-
-        smi_output = subprocess.check_output(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'],
-                                             **subprocess_kwargs)
-        if smi_output.strip():
-            parts = smi_output.strip().split(', ')
-            gpu_name = parts[0]
-            vram_mb = int(parts[1].replace(' MiB', '').replace(' MB', ''))
-            vram_gb = round(vram_mb / 1024)
-            has_gpu = True
-    except Exception:
-        pass
-
-    rec_model = "tiny (Fastest / Low Accuracy)"
-    if has_gpu:
-        if vram_gb >= 8:
-            rec_model = "large-v3-turbo (3x Faster / High Accuracy)"
-        elif vram_gb >= 6:
-            rec_model = "distil-large-v3 (6x Faster / High Accuracy)"
-        elif vram_gb >= 4:
-            rec_model = "small (Balanced)"
-        else:
-            rec_model = "base (Fast / Basic Accuracy)"
-    elif ram_gb >= 16:
-        rec_model = "base (Fast / Basic Accuracy)"
+    recommended = recommend_models(bool(gpus), vram_gb, ram_gb)
+    if recommended["translate"] == recommended["transcribe"]:
+        rec_line = f"Recommendation: Auto-selected '{recommended['translate']}' based on your system."
+    else:
+        rec_line = (f"Recommendation: '{recommended['translate']}' for Translate to English, "
+                    f"'{recommended['transcribe']}' for Keep Original Language.")
 
     report_text = (
         f"--- System Hardware Scan ---\n"
         f"CPU: {cpu_display}\n"
         f"RAM: {ram_display}\n"
-        f"GPU: {gpu_name} ({vram_gb} GB VRAM)\n\n"
-        f"Recommendation: Auto-selected '{rec_model.split(' ')[0]}' based on your system."
+        f"GPU: {gpu_display}\n\n"
+        f"{rec_line}"
     )
-    return report_text, rec_model
+    return {"report": report_text, "recommended": recommended, "gpu_index": gpu_index}
