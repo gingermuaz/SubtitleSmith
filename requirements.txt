@@ -1,0 +1,11 @@
+# SubtitleSmith's dependencies, pinned to the versions it's tested with.
+# Install with:  python -m pip install -r requirements.txt
+faster-whisper==1.2.1
+ctranslate2==4.7.1
+customtkinter==5.2.2
+tkinterdnd2==0.4.3
+psutil==7.2.2
+
+# CUDA libraries for GPU processing (no CUDA Toolkit needed, just an NVIDIA driver)
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.21.1.3
