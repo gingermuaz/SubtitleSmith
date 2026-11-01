@@ -1,8 +1,8 @@
 # SubtitleSmith
 
-SubtitleSmith is a local, AI-powered desktop application that extracts audio from video files and converts it to synchronised `.srt` subtitles using the NVIDIA CUDA engine and `faster-whisper`.
+SubtitleSmith is a local, AI-powered desktop application that turns video and audio files into synchronised subtitles (.srt, .vtt or .txt) using faster-whisper and the NVIDIA CUDA engine (or your CPU). It can translate the speech into English, keep the original language, or give you both, and translate the subtitles into other languages with Meta’s NLLB-200.
 
-Featuring drag-and-drop file support and an intelligent hardware scanner that automatically recommends the best AI model for your system's VRAM. All processing runs locally on your machine—no API keys required, and no internet connection once each AI model has downloaded on first use!
+Drop in a single file or a whole batch, and an intelligent hardware scanner automatically recommends the best AI models for your system’s VRAM. Add the subtitles to your video as a switchable track or burn them into the picture, label who’s speaking, and review them before they’re saved. All processing runs locally on your machine—no API keys required, and no internet connection once each AI model has downloaded on first use!
 
 ## Features
 
