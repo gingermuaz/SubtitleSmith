@@ -3,7 +3,7 @@
 Examples:
   python cli.py film.mkv
   python cli.py "D:\\Films" --recursive --task transcribe --also-english --video track
-  python cli.py talk.mp4 --language en --translate-to bn --format vtt --output-dir subs
+  python cli.py talk.mp4 --language en --translate-to bn --translator best --format vtt --output-dir subs
 
 Run  python cli.py --help  to see every option. The exit code is 0 if every file worked, 1 if any
 failed, 2 if nothing could start, and 130 if interrupted with Ctrl+C.
@@ -20,6 +20,7 @@ import hardware
 import languages
 import progress
 import speakers
+import translation
 import video
 
 LANGUAGE_CODES = sorted(languages.NAMES)
@@ -58,6 +59,9 @@ def parse_args(argv=None):
                         help="subtitles in the spoken language plus an English file (<name>.en.srt)")
     parser.add_argument("--translate-to", choices=LANGUAGE_CODES, metavar="CODE",
                         help="also save a translation into this language, e.g. fr, bn, ja (<name>.fr.srt)")
+    parser.add_argument("--translator", choices=list(translation.MODELS),
+                        help="translation model size for --also-english and --translate-to: fast (600 MB), "
+                             "better (1.4 GB) or best (3.4 GB) (default: the best one for this computer)")
     parser.add_argument("--language", choices=["auto"] + LANGUAGE_CODES, default="auto", metavar="CODE",
                         help="the spoken language, e.g. ja (default: detect it)")
     parser.add_argument("--model", choices=list(engine.MODEL_REPOS),
@@ -123,6 +127,7 @@ def main(argv=None, stream=None):
     vram_gb = round(vram_mb / 1024)
     ram_gb = round(psutil.virtual_memory().total / 1024 ** 3)
     model = args.model or hardware.recommend_models(bool(gpus), vram_gb, ram_gb)[task]
+    translator = args.translator or hardware.recommend_translator(bool(gpus), vram_gb, ram_gb)
     problem = hardware.model_job_problem(model, task, args.language)
     if problem:
         print(f"Warning: {problem}", file=stream)
@@ -142,17 +147,19 @@ def main(argv=None, stream=None):
         device_index=gpu_index, vad_filter=not args.no_vad, output_format=output_format,
         readable_lines=not args.no_readable_lines, names_and_terms=args.names, video_output=args.video,
         batch_size=0 if args.no_fast_mode or args.cpu else hardware.batch_size_for(vram_gb),
-        also_english=args.also_english, translate_to=args.translate_to, speaker_labels=args.speakers,
-        num_speakers=args.num_speakers,
+        also_english=args.also_english, translate_to=args.translate_to, translator=translator,
+        speaker_labels=args.speakers, num_speakers=args.num_speakers,
         burn_style={"size": args.burn_size, "colour": args.burn_colour, "position": args.burn_position},
     )
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
     line = ProgressLine(stream, enabled=not args.quiet)
-    print(f"{len(files)} file(s), model '{model}' on {'CPU' if args.cpu or not gpus else 'GPU'}", file=stream)
+    translating = bool(args.also_english or args.translate_to)
+    models = f"model '{model}'" + (f" and the '{translator}' translation model" if translating else "")
+    print(f"{len(files)} file(s), {models} on {'CPU' if args.cpu or not gpus else 'GPU'}", file=stream)
     succeeded, failed = 0, 0
     try:
-        engine.prepare(model, compute, gpu_index, translate=bool(args.also_english or args.translate_to),
+        engine.prepare(model, compute, gpu_index, translate=translating, translator=translator,
                        speaker_labels=args.speakers, progress_callback=line)
         for i, media in enumerate(files):
             name = os.path.basename(media)

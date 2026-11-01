@@ -8,4 +8,4 @@
 #
 # The first time you use speaker labels, SubtitleSmith asks for a free Hugging Face access token
 # (see "Speaker Labels" in README.md).
-pyannote.audio==4.0.4
+pyannote.audio==4.0.7

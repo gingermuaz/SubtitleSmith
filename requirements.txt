@@ -1,7 +1,12 @@
 # SubtitleSmith's dependencies, pinned to the versions it's tested with.
 # Install with:  python -m pip install -r requirements.txt
 faster-whisper==1.2.1
-ctranslate2==4.7.1
+ctranslate2==4.8.4
+# Also used directly by SubtitleSmith (model downloads, translation, reading media); pinned so a fresh
+# install doesn't pick up untested major versions such as huggingface_hub 2.x
+huggingface_hub==1.13.0
+tokenizers==0.23.1
+av==17.0.1
 customtkinter==5.2.2
 tkinterdnd2==0.4.3
 psutil==7.2.2

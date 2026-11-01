@@ -7,8 +7,8 @@ IS_WINDOWS = platform.system() == "Windows"
 CREATE_NO_WINDOW = 0x08000000 if IS_WINDOWS else 0
 
 # Models that can't do every job (codes match the start of each label in GUI.MODELS)
-NO_TRANSLATION = {"large-v3-turbo", "distil-large-v3"}  # can't translate to English
-ENGLISH_ONLY = {"distil-large-v3"}  # only understands English audio
+NO_TRANSLATION = {"large-v3-turbo", "distil-large-v3.5"}  # can't translate to English
+ENGLISH_ONLY = {"distil-large-v3.5"}  # only understands English audio
 
 def get_clean_cpu_name():
     if IS_WINDOWS:
@@ -65,7 +65,7 @@ def recommend_models(has_gpu, vram_gb, ram_gb):
         if vram_gb >= 8:
             return {"transcribe": "large-v3-turbo", "translate": "large-v3"}
         if vram_gb >= 6:
-            # turbo is about the same size as distil-large-v3 (the old 6GB pick) but handles every language
+            # turbo is about the same size as distil-large-v3.5 but handles every language
             return {"transcribe": "large-v3-turbo", "translate": "medium"}
         if vram_gb >= 4:
             return {"transcribe": "small", "translate": "small"}
@@ -73,6 +73,20 @@ def recommend_models(has_gpu, vram_gb, ram_gb):
     if ram_gb >= 16:
         return {"transcribe": "base", "translate": "base"}
     return {"transcribe": "tiny", "translate": "tiny"}
+
+
+def recommend_translator(has_gpu, vram_gb, ram_gb):
+    """Picks the size of translation model this PC handles comfortably: "fast", "better" or "best".
+
+    It shares the GPU with the speech model (and speaker labels), so "best" needs a roomy one.
+    """
+    if has_gpu:
+        if vram_gb >= 10:
+            return "best"
+        if vram_gb >= 4:
+            return "better"
+        return "fast"
+    return "better" if ram_gb >= 16 else "fast"
 
 
 def batch_size_for(vram_gb):
@@ -114,7 +128,8 @@ def get_nvidia_gpus():
 
 
 def scan_system():
-    """Returns {"report": text, "recommended": {task: model_code}, "gpu_index": int, "vram_gb": int}."""
+    """Returns {"report": text, "recommended": {task: model_code}, "translator": "fast"/"better"/"best",
+    "gpu_index": int, "vram_gb": int}."""
     cpu_name = get_clean_cpu_name()
     cores = psutil.cpu_count(logical=False) or "Unknown"
     threads = psutil.cpu_count(logical=True) or "Unknown"
@@ -140,6 +155,7 @@ def scan_system():
         gpu_display = "No NVIDIA GPU detected (0 GB VRAM)"
 
     recommended = recommend_models(bool(gpus), vram_gb, ram_gb)
+    translator = recommend_translator(bool(gpus), vram_gb, ram_gb)
     if recommended["translate"] == recommended["transcribe"]:
         rec_line = f"Recommendation: Auto-selected '{recommended['translate']}' based on your system."
     else:
@@ -150,7 +166,9 @@ def scan_system():
         f"--- System Hardware Scan ---\n"
         f"CPU: {cpu_display}\n"
         f"RAM: {ram_display}\n"
-        f"GPU: {gpu_display}\n\n"
-        f"{rec_line}"
+        f"GPU: {gpu_display}\n"
+        f"{rec_line}\n"
+        f"Translation model: '{translator.capitalize()}' suits this PC."
     )
-    return {"report": report_text, "recommended": recommended, "gpu_index": gpu_index, "vram_gb": vram_gb}
+    return {"report": report_text, "recommended": recommended, "translator": translator, "gpu_index": gpu_index,
+            "vram_gb": vram_gb}

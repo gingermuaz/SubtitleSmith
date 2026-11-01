@@ -384,6 +384,42 @@ class DownloadTests(unittest.TestCase):
             self.download(FakeHub(self.folder, fail_on="model.bin"))
 
 
+class TranslatorLoadingTests(unittest.TestCase):
+    def setUp(self):
+        self.downloads, self.loaded = [], []
+        test = self
+
+        class FakeNllb:
+            def __init__(self, folder, device, device_index):
+                test.loaded.append((folder, device, device_index))
+
+        def download(repo_id, files, what, progress_callback=None, cancel_check=None):
+            self.downloads.append((repo_id, what))
+            return "folder:" + repo_id
+        for patcher in (mock.patch.object(engine, "download_model", download),
+                        mock.patch.object(engine.translation, "Translator", FakeNllb),
+                        mock.patch.dict(engine._translator, {"key": None, "model": None})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_each_size_has_its_own_model(self):
+        first = engine.get_translator("better", "cuda", 1)
+        self.assertIs(engine.get_translator("better", "cuda", 1), first)  # loaded once, then reused
+        self.assertEqual(self.downloads, [("OpenNMT/nllb-200-distilled-1.3B-ct2-int8",
+                                           "the 'Better' translation model")])
+        self.assertEqual(self.loaded, [("folder:OpenNMT/nllb-200-distilled-1.3B-ct2-int8", "cuda", 1)])
+        best = engine.get_translator("best", "cuda", 1)
+        self.assertIsNot(best, first)
+        self.assertEqual(self.downloads[-1][0], "OpenNMT/nllb-200-3.3B-ct2-int8")
+        self.assertIs(engine._translator["model"], best)  # only one translation model kept in memory
+        engine.get_translator("fast", "cpu")
+        self.assertEqual(self.downloads[-1][0], "skywood/nllb-200-distilled-600M-ct2-int8")
+
+    def test_unknown_size(self):
+        with self.assertRaises(ValueError):
+            engine.get_translator("huge")
+
+
 @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg isn't installed")
 class MediaDurationTests(unittest.TestCase):
     def test_reads_the_length(self):
@@ -494,6 +530,12 @@ class TranslationAndExtrasTests(EngineTestCase):
             engine.process_file(film, output, video_output="burn", burn_style=style)
         self.assertEqual(burn.call_args.kwargs["style"], style)
 
+    def test_translator_size_is_passed_on(self):
+        self.run_file(task="transcribe", translate_to="bn", translator="best")
+        self.assertEqual(engine.get_translator.call_args.args[0], "best")
+        self.run_file(task="transcribe", also_english=True)
+        self.assertEqual(engine.get_translator.call_args.args[0], "better")  # the default
+
     def test_prepare_loads_only_what_is_needed(self):
         with mock.patch.object(engine.speakers, "get_pipeline") as pipeline:
             engine.prepare("small")
@@ -501,6 +543,8 @@ class TranslationAndExtrasTests(EngineTestCase):
             engine.prepare("small", translate=True, speaker_labels=True, compute_device="cpu")
         self.assertEqual(len(engine.get_translator.call_args_list), 1)
         self.assertIs(pipeline.call_args.args[0], False)  # CPU chosen: no GPU for speakers either
+        engine.prepare("small", translate=True, translator="fast")
+        self.assertEqual(engine.get_translator.call_args.args[:2], ("fast", "auto"))
 
     def test_extra_output_path(self):
         self.assertEqual(engine.extra_output_path("C:/a/film_subtitle.srt", "en"), "C:/a/film_subtitle.en.srt")

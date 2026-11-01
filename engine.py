@@ -70,7 +70,7 @@ MODEL_REPOS = {
     "small": "Systran/faster-whisper-small",
     "medium": "Systran/faster-whisper-medium",
     "large-v3": "Systran/faster-whisper-large-v3",
-    "distil-large-v3": "Systran/faster-distil-whisper-large-v3",
+    "distil-large-v3.5": "distil-whisper/distil-large-v3.5-ct2",
     "large-v3-turbo": "deepdml/faster-whisper-large-v3-turbo-ct2",
 }
 # The files faster-whisper needs from a model repository (the same list it downloads itself)
@@ -183,19 +183,26 @@ def _load(key, folder):
         return model
 
 
-def get_translator(compute_device="auto", device_index=0, progress_callback=None, cancel_check=None):
-    """The NLLB-200 translation model, downloaded on first use and loaded once."""
-    key = (compute_device, device_index)
+def get_translator(translator=translation.DEFAULT, compute_device="auto", device_index=0, progress_callback=None,
+                   cancel_check=None):
+    """An NLLB-200 translation model ("fast", "better" or "best"), downloaded on first use and loaded once."""
+    if translator not in translation.MODELS:
+        raise ValueError(f"Unknown translation model: {translator}")
+    key = (translator, compute_device, device_index)
     if _translator["key"] == key:
         return _translator["model"]
-    folder = download_model(translation.REPO, translation.FILES, "the translation model", progress_callback,
-                            cancel_check)
+    name = f"the '{translator.capitalize()}' translation model"
+    folder = download_model(translation.MODELS[translator], translation.FILES, name, progress_callback, cancel_check)
     if progress_callback:
-        progress_callback(0, 100, "Loading the translation model...", "load")
+        progress_callback(0, 100, f"Loading {name}...", "load")
 
     def load():
         with _load_lock:
             if _translator["key"] != key:
+                # Drop the old one first so two translation models never sit in memory at once
+                _translator["key"] = None
+                _translator["model"] = None
+                gc.collect()
                 _translator["model"] = translation.Translator(folder, compute_device, device_index)
                 _translator["key"] = key
             return _translator["model"]
@@ -203,11 +210,11 @@ def get_translator(compute_device="auto", device_index=0, progress_callback=None
 
 
 def prepare(model_size, compute_device="auto", device_index=0, translate=False, speaker_labels=False,
-            progress_callback=None, cancel_check=None):
+            translator=translation.DEFAULT, progress_callback=None, cancel_check=None):
     """Downloads and loads everything a queue needs before its first file, so problems show up once."""
     get_model(model_size, compute_device, device_index, progress_callback, cancel_check)
     if translate:
-        get_translator(compute_device, device_index, progress_callback, cancel_check)
+        get_translator(translator, compute_device, device_index, progress_callback, cancel_check)
     if speaker_labels:
         speakers.get_pipeline(compute_device != "cpu", progress_callback, cancel_check)
 
@@ -311,13 +318,14 @@ def _transcribe_once(media_path, model, source_language, task, vad_filter, names
 def process_file(media_path, output_file, model_size="large-v3", source_language="auto", task="translate",
                  compute_device="auto", device_index=0, vad_filter=True, output_format=".srt",
                  readable_lines=True, names_and_terms="", video_output="none", batch_size=0,
-                 also_english=False, translate_to=None, speaker_labels=False, num_speakers=None,
-                 burn_style=None, review=None, progress_callback=None, cancel_check=None):
+                 also_english=False, translate_to=None, translator=translation.DEFAULT, speaker_labels=False,
+                 num_speakers=None, burn_style=None, review=None, progress_callback=None, cancel_check=None):
     """Makes subtitles for one media file and, if asked, adds them to a copy of the video.
 
     task: "translate" (English subtitles) or "transcribe" (the spoken language).
     also_english: also save an English translation next to it (<name>.en.srt).
     translate_to: also save a translation into this language, e.g. "fr" (<name>.fr.srt).
+    translator: which size of translation model those use: "fast", "better" or "best".
     speaker_labels: start a subtitle with "Speaker 1:" etc. whenever the speaker changes.
     video_output: "none", "track" (every language as a subtitle track viewers can switch on and off)
     or "burn" (the main subtitles drawn into the picture, styled by burn_style).
@@ -358,15 +366,15 @@ def process_file(media_path, output_file, model_size="large-v3", source_language
                 notes.append("It's already in English, so there's no separate English file.")
             continue
         try:
-            translator = get_translator(compute_device, device_index, progress_callback, cancel_check)
+            nllb = get_translator(translator, compute_device, device_index, progress_callback, cancel_check)
             name = languages.name(target)
 
             def translate_progress(done, total, name=name):
                 if progress_callback:
                     progress_callback(done, total, f"Translating subtitles into {name}... "
                                                    f"{round(done / total * 100)}%", "translate")
-            texts = translator.translate([segment.text for segment in segments], language, target, cancel_check,
-                                         translate_progress)
+            texts = nllb.translate([segment.text for segment in segments], language, target, cancel_check,
+                                   translate_progress)
         except ProcessingError as e:
             notes.append(f"No {languages.name(target)} subtitles: {e}")
             continue

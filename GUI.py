@@ -41,7 +41,7 @@ MODELS = [
     "base (Fast / Basic Accuracy)",
     "small (Balanced)",
     "medium (Slower / High Accuracy)",
-    "distil-large-v3 (6x Faster / English Only)",
+    "distil-large-v3.5 (6x Faster / English Only)",
     "large-v3-turbo (3x Faster / No Translation)",
     "large-v3 (Slowest / Best Accuracy)"
 ]
@@ -57,6 +57,9 @@ AUTO_SAVE = "<Auto-save to original directories>"
 VIDEO_OUTPUTS = {"Subtitles only": "none", "Add subtitle track": "track", "Burn into video": "burn"}
 TASKS = ["Translate to English", "Keep Original Language", "Original + English"]
 TRANSLATE_TARGETS = ["None"] + [language for language in LANGUAGES if not language.startswith("Auto")]
+# Translation model sizes (translation.MODELS) -> label in the System tab's Translation Model menu
+TRANSLATORS = {"fast": "Fast (NLLB 600M, 0.6 GB)", "better": "Better (NLLB 1.3B, 1.4 GB)",
+               "best": "Best (NLLB 3.3B, 3.4 GB)"}
 
 # Choices remembered between launches: settings key -> (variable on App, allowed values; None = on/off)
 REMEMBERED = {
@@ -68,7 +71,10 @@ REMEMBERED = {
     "speaker_labels": ("speaker_labels_var", None), "review": ("review_var", None),
     "burn_size": ("burn_size_var", list(video.BURN_SIZES)), "burn_colour": ("burn_colour_var", list(video.BURN_COLOURS)),
     "burn_position": ("burn_position_var", list(video.BURN_POSITIONS)),
+    "translator": ("translator_var", list(TRANSLATORS.values())),
 }
+# Saved choices whose menu label has changed since: old label -> new label
+RENAMED = {"distil-large-v3 (6x Faster / English Only)": "distil-large-v3.5 (6x Faster / English Only)"}
 
 QUEUE_COLOURS = {"waiting": "gray55", "working": "#3b8ed0", "done": "#28a745", "failed": "#dc3545",
                  "canceled": "gray55"}
@@ -103,6 +109,11 @@ def model_label(code):
     return next(m for m in MODELS if model_code(m) == code)
 
 
+def translator_code(label):
+    """'Better (NLLB 1.3B, 1.4 GB)' -> 'better'"""
+    return next(code for code, text in TRANSLATORS.items() if text == label)
+
+
 def output_path_for(media_path, save_val, fmt, total_files):
     """Works out where one file's subtitles go."""
     if total_files == 1:
@@ -128,6 +139,7 @@ class App:
         self.eta = None
         self.running = False
         self.model_chosen = False  # True once the model comes from saved settings or the user picks one
+        self.translator_chosen = False  # the same for the translation model
         self.batch_prefix = ""
         self._review_dialog = None
         self.cancel_event = threading.Event()
@@ -178,6 +190,7 @@ class App:
         self.burn_size_var = ctk.StringVar(value="Medium")
         self.burn_colour_var = ctk.StringVar(value="White")
         self.burn_position_var = ctk.StringVar(value="Bottom")
+        self.translator_var = ctk.StringVar(value=TRANSLATORS["better"])
         self.status_var = ctk.StringVar(value="Ready")
 
         self._apply_saved_settings()
@@ -289,7 +302,7 @@ class App:
         self.cancel_button.pack(side="left", padx=15)
 
         # 10. Queue and system info
-        self.tabs = ctk.CTkTabview(frame, width=620, height=185)
+        self.tabs = ctk.CTkTabview(frame, width=620, height=205)
         self.tabs.grid(row=10, column=0, columnspan=4, pady=(0, 10))
         monospace = ctk.CTkFont(family="Consolas" if platform.system() == "Windows" else "DejaVu Sans Mono", size=12)
         self.queue_box = ctk.CTkTextbox(self.tabs.add("Queue"), width=600, height=130, font=monospace, wrap="none")
@@ -298,8 +311,15 @@ class App:
             self.queue_box.tag_config(status, foreground=colour)
         self.queue_box.insert("0.0", "Choose or drop media files and they'll be listed here.")
         self.queue_box.configure(state="disabled")
-        self.hw_textbox = ctk.CTkTextbox(self.tabs.add("System"), width=600, height=130, text_color="#28a745",
-                                         fg_color="#1e1e1e")
+        system_tab = self.tabs.add("System")
+        translator_row = ctk.CTkFrame(system_tab, fg_color="transparent")
+        translator_row.pack(side="bottom", fill="x", pady=(6, 0))
+        ctk.CTkLabel(translator_row, text="Translation Model:").pack(side="left", padx=(0, 5))
+        ctk.CTkOptionMenu(translator_row, variable=self.translator_var, values=list(TRANSLATORS.values()), width=220,
+                          command=self.on_translator_chosen).pack(side="left")
+        ctk.CTkLabel(translator_row, text="for Original + English and Also translate to",
+                     text_color="gray").pack(side="left", padx=10)
+        self.hw_textbox = ctk.CTkTextbox(system_tab, width=600, height=96, text_color="#28a745", fg_color="#1e1e1e")
         self.hw_textbox.pack(fill="both", expand=True)
         self.tabs.set("System")
 
@@ -328,6 +348,8 @@ class App:
         self.vram_gb = scan["vram_gb"]
         if not self.model_chosen:
             self.model_var.set(model_label(self.recommended_models[self.current_task()]))
+        if not self.translator_chosen and scan.get("translator") in TRANSLATORS:
+            self.translator_var.set(TRANSLATORS[scan["translator"]])
 
     def _set_hardware_text(self, text):
         self.hw_textbox.configure(state="normal")
@@ -340,10 +362,13 @@ class App:
     def _apply_saved_settings(self):
         for key, (attribute, allowed) in REMEMBERED.items():
             value = self.saved.get(key)
+            value = RENAMED.get(value, value) if isinstance(value, str) else value
             if isinstance(value, bool) if allowed is None else value in allowed:
                 getattr(self, attribute).set(value)
                 if key == "model":
                     self.model_chosen = True
+                elif key == "translator":
+                    self.translator_chosen = True
         if self.theme_var.get():
             ctk.set_appearance_mode("light")
 
@@ -374,6 +399,9 @@ class App:
 
     def on_model_chosen(self, value=None):
         self.model_chosen = True
+
+    def on_translator_chosen(self, value=None):
+        self.translator_chosen = True
 
     def on_task_change(self, value=None):
         """Keeps the AI model suitable when switching between Translate and Keep Original."""
@@ -589,7 +617,7 @@ class App:
             names_and_terms=self.names_entry.get().strip(), video_output=video_output, batch_size=batch_size,
             also_english=self.task_var.get() == "Original + English",
             translate_to=None if translate_to == "None" else translate_to.split("(")[-1].rstrip(")"),
-            speaker_labels=speaker_labels,
+            translator=translator_code(self.translator_var.get()), speaker_labels=speaker_labels,
             burn_style={"size": self.burn_size_var.get(), "colour": self.burn_colour_var.get(),
                         "position": self.burn_position_var.get()},
             review=self.review if self.review_var.get() else None,
@@ -672,7 +700,8 @@ class App:
             try:
                 engine.prepare(job["model_size"], compute, device_index,
                                translate=bool(job["also_english"] or job["translate_to"]),
-                               speaker_labels=job["speaker_labels"], progress_callback=self.update_gui_progress,
+                               translator=job["translator"], speaker_labels=job["speaker_labels"],
+                               progress_callback=self.update_gui_progress,
                                cancel_check=self.check_cancel)
             except engine.ProcessCancelled:
                 cancelled = True

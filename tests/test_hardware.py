@@ -3,7 +3,7 @@ from unittest import mock
 
 import hardware
 
-ALL_MODELS = {"tiny", "base", "small", "medium", "distil-large-v3", "large-v3-turbo", "large-v3"}
+ALL_MODELS = {"tiny", "base", "small", "medium", "distil-large-v3.5", "large-v3-turbo", "large-v3"}
 
 
 def fake_nvidia_smi(output=None, error=None):
@@ -48,6 +48,19 @@ class RecommendationTests(unittest.TestCase):
                 self.assertIn(code, ALL_MODELS)
                 self.assertIsNone(hardware.model_job_problem(code, task, "ja"), (vram, task, code))
 
+    def test_translator_sizes(self):
+        pick = hardware.recommend_translator
+        self.assertEqual([pick(True, gb, 16) for gb in (2, 4, 8, 10, 24)], ["fast", "better", "better", "best", "best"])
+        self.assertEqual((pick(False, 0, 8), pick(False, 0, 32)), ("fast", "better"))
+
+    def test_every_model_is_known(self):
+        import engine
+        import translation
+        self.assertEqual(ALL_MODELS, set(engine.MODEL_REPOS))
+        self.assertTrue(hardware.NO_TRANSLATION <= ALL_MODELS and hardware.ENGLISH_ONLY <= ALL_MODELS)
+        for has_gpu, vram, ram in [(True, 2, 8), (True, 12, 8), (False, 0, 8), (False, 0, 32)]:
+            self.assertIn(hardware.recommend_translator(has_gpu, vram, ram), translation.MODELS)
+
     def test_fast_mode_batch_sizes(self):
         self.assertEqual([hardware.batch_size_for(gb) for gb in (0, 2, 4, 6, 8, 12, 24)], [0, 2, 4, 8, 8, 16, 16])
 
@@ -56,9 +69,9 @@ class RecommendationTests(unittest.TestCase):
         self.assertIsNotNone(problem("large-v3-turbo", "translate", "ja"))
         self.assertIsNone(problem("large-v3-turbo", "translate", "en"))  # English audio is already English
         self.assertIsNone(problem("large-v3-turbo", "transcribe", "ja"))
-        self.assertIn("English", problem("distil-large-v3", "translate", "auto"))
-        self.assertIsNotNone(problem("distil-large-v3", "transcribe", "ja"))
-        self.assertIsNone(problem("distil-large-v3", "transcribe", "auto"))
+        self.assertIn("English", problem("distil-large-v3.5", "translate", "auto"))
+        self.assertIsNotNone(problem("distil-large-v3.5", "transcribe", "ja"))
+        self.assertIsNone(problem("distil-large-v3.5", "transcribe", "auto"))
         self.assertIsNone(problem("large-v3", "translate", "ja"))
 
 

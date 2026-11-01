@@ -62,7 +62,7 @@ Featuring drag-and-drop file support and an intelligent hardware scanner that au
 2. **Configure AI Settings:** Choose your **Source Language** (or use Auto-Detect) and select an **AI Model**. The built-in hardware scanner will automatically recommend the best model for your PC. With Auto-Detect, SubtitleSmith tells you which language it heard (e.g. "Detected language: Japanese (97%)").
     * **Names & Terms (optional):** List character names or special words (e.g. `Frodo, Gandalf, Mordor`) so the AI spells them correctly.
 3. **Choose Action:** **Translate to English**, **Keep Original Language** (transcribe), or **Original + English** (both: `film_subtitle.srt` in the original language and `film_subtitle.en.srt` in English).
-    * **Also translate to:** Adds a translation into another language too (e.g. `film_subtitle.bn.srt`). Translations use Meta's NLLB-200 model (about 600 MB, downloaded the first time). Its licence allows **non-commercial use only**.
+    * **Also translate to:** Adds a translation into another language too (e.g. `film_subtitle.bn.srt`). Translations use Meta's NLLB-200 model, downloaded the first time. Choose its size with **Translation Model** in the **System** tab: *Fast* (600 MB), *Better* (1.4 GB) or *Best* (3.4 GB, for GPUs with 10 GB+ VRAM). Bigger translates better but takes longer; the hardware scan picks the one that suits your PC. Its licence allows **non-commercial use only**.
     * **Speaker Labels:** Starts a subtitle with "Speaker 1:", "Speaker 2:"... whenever the speaker changes. Needs the optional extra packages and a one-time setup (see [Speaker Labels](#speaker-labels)).
     * **Review Before Saving:** Opens each file's subtitles in an editor before they're saved, so you can fix words (Replace All fixes a misheard name everywhere at once). The queue waits for you.
 4. **Tweak Advanced Settings (Optional):**
@@ -84,7 +84,7 @@ Featuring drag-and-drop file support and an intelligent hardware scanner that au
 ```bash
 python cli.py film.mkv
 python cli.py "D:\Films" --recursive --task transcribe --also-english --video track
-python cli.py talk.mp4 --language en --translate-to bn --format vtt --output-dir subs
+python cli.py talk.mp4 --language en --translate-to bn --translator best --format vtt --output-dir subs
 ```
 
 Run `python cli.py --help` for every option. It exits with 0 if every file worked and 1 if any failed, so scripts can check.

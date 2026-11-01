@@ -63,6 +63,37 @@ class TranslatorTests(unittest.TestCase):
         with mock.patch.object(translation, "BATCH_SIZE", 1), self.assertRaises(ProcessCancelled):
             self.translator.translate(["Hello", "Hello"], "en", "fr", cancel_check=lambda: True)
 
+    def test_out_of_gpu_memory_splits_the_batch(self):
+        model = self.translator.model
+        real = model.translate_batch
+
+        def limited(sources, target_prefix, beam_size):
+            if len(sources) > 2:
+                raise RuntimeError("CUDA failed with error out of memory")
+            return real(sources, target_prefix, beam_size)
+        model.translate_batch = limited
+        with mock.patch.object(translation, "BATCH_SIZE", 8):
+            result = self.translator.translate(["Hello friend"] * 7, "en", "fr")
+        self.assertEqual(result, ["Bonjour ami"] * 7)
+        self.assertEqual(sorted(len(sources) for sources, _ in model.calls), [1, 2, 2, 2])
+
+    def test_out_of_gpu_memory_even_one_at_a_time(self):
+        def broke(sources, target_prefix, beam_size):
+            raise RuntimeError("CUDA failed with error out of memory")
+        self.translator.model.translate_batch = broke
+        with self.assertRaisesRegex(ProcessingError, "Not enough GPU memory"):
+            self.translator.translate(["Hello", "there"], "en", "fr")
+
+    def test_other_errors_are_not_retried(self):
+        self.translator.model.translate_batch = mock.Mock(side_effect=RuntimeError("bad model file"))
+        with self.assertRaisesRegex(RuntimeError, "bad model file"):
+            self.translator.translate(["Hello", "there"], "en", "fr")
+        self.assertEqual(self.translator.model.translate_batch.call_count, 1)
+
+    def test_models(self):
+        self.assertEqual(list(translation.MODELS), ["fast", "better", "best"])
+        self.assertIn(translation.DEFAULT, translation.MODELS)
+
     def test_languages_it_cannot_translate(self):
         with self.assertRaisesRegex(ProcessingError, "can't translate Latin"):
             self.translator.translate(["Salve"], "la", "en")

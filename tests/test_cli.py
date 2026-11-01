@@ -94,6 +94,19 @@ class MainTests(CliTestCase):
         self.assertEqual((job["compute_device"], job["batch_size"], job["readable_lines"]), ("cpu", 0, False))
         self.assertEqual((job["video_output"], job["burn_style"]["colour"], job["names_and_terms"]), ("burn", "Yellow", "Frodo"))
         self.assertEqual(fake.prepared[1]["translate"], True)
+        ram_gb = round(cli.psutil.virtual_memory().total / 1024 ** 3)
+        expected = cli.hardware.recommend_translator(False, 0, ram_gb)  # --cpu: picked for the CPU
+        self.assertEqual((job["translator"], fake.prepared[1]["translator"]), (expected, expected))
+
+    def test_translator_choice(self):
+        film = os.path.join(self.folder, "a.mp4")
+        _, out, fake = self.run_cli(film, "--translate-to", "fr", gpus=[(0, "RTX", 12288)])
+        self.assertEqual(fake.calls[0][2]["translator"], "best")  # a roomy GPU gets the biggest
+        self.assertIn("and the 'best' translation model", out)
+        _, out, fake = self.run_cli(film, "--translate-to", "fr", "--translator", "fast", gpus=[(0, "RTX", 12288)])
+        self.assertEqual((fake.calls[0][2]["translator"], fake.prepared[1]["translator"]), ("fast", "fast"))
+        _, out, _ = self.run_cli(film)
+        self.assertNotIn("translation model", out)  # not translating
 
     def test_nothing_to_do(self):
         code, out, _ = self.run_cli(os.path.join(self.folder, "notes.txt.missing"))
