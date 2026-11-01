@@ -12,7 +12,7 @@ Featuring drag-and-drop file support and an intelligent hardware scanner that au
 * **Readable Subtitles:** Long passages are split into proper subtitles—at most two lines, each on screen for 1–7 seconds, broken at sentence ends and pauses—with shorter lines for Chinese, Japanese and Korean.
 * **Fast Mode:** On an NVIDIA GPU, SubtitleSmith transcribes several pieces of audio at once, which is often several times faster on long films.
 * **Flexible Export Options:** Export your text as standard subtitles (`.srt`), web subtitles (`.vtt`) or raw transcripts (`.txt`). Add them to a copy of your video as a **subtitle track viewers can switch on and off** (takes seconds), or **permanently burn (hardcode) them into the picture** using your NVIDIA GPU's video encoder!
-* **Sleek & Interactive UI:** Light and Dark mode interface featuring drag-and-drop targets, double-click file browsing, live batch progress bars, and safe process cancellation.
+* **Sleek & Interactive UI:** Light and Dark mode interface featuring drag-and-drop targets, double-click file browsing, a queue list showing each file's status, an estimate of the time left, and a Cancel button that stops straight away—even mid-download or mid-encode. Your choices are remembered for next time.
 * **Smart Auto-Namer:** Automatically generates and saves your output files in the exact same directory as your source media.
 
 ## Requirements
@@ -21,7 +21,7 @@ Featuring drag-and-drop file support and an intelligent hardware scanner that au
 * **GPU:** NVIDIA GPU with an up-to-date driver (8GB+ VRAM highly recommended for `large-v3` models). You don't need the CUDA Toolkit: the CUDA libraries (cuBLAS and cuDNN) are installed by pip with the other dependencies. No NVIDIA GPU? Choose **Force CPU** (much slower).
 * **Python:** Python 3.12 or higher.
 * **FFmpeg (optional):** Only needed for the **Video** options (adding a subtitle track or burning subtitles in). Reading audio from your media files is built in.
-* **Internet (first use only):** Each AI model downloads from Hugging Face the first time you use it, from about 75 MB (`tiny`) to about 3 GB (`large-v3`).
+* **Internet (first use only):** Each AI model downloads from Hugging Face the first time you use it, from about 75 MB (`tiny`) to about 3 GB (`large-v3`). The status bar shows the download's progress, and an interrupted download carries on from where it stopped next time.
 
 ## Setup & Installation
 
@@ -65,7 +65,7 @@ Featuring drag-and-drop file support and an intelligent hardware scanner that au
     * **Fast Mode:** On by default. With an NVIDIA GPU, transcribes several pieces of audio at once, which is much faster on long files (if the GPU runs out of memory, it automatically uses smaller batches). Turn it off if a film comes out with more mistakes than usual: normal mode re-checks unclear passages.
     * **Video:** *Subtitles only* saves just the subtitle file. *Add subtitle track* also saves a copy of your video (`_subtitled`) with the subtitles as a track viewers can switch on and off. Nothing is re-encoded, so it takes seconds (AVI videos become MKV). *Burn into video* saves a copy (`_hardcoded.mp4`) with the subtitles drawn permanently into the picture, using your GPU's NVENC encoder when FFmpeg can (much faster than the CPU). Both need FFmpeg.
     * **Readable Lines:** On by default. Splits long passages into subtitles of up to two lines that stay on screen for 1–7 seconds. Turn it off to get one subtitle per AI segment, however long.
-5. **Process:** Click **Start Processing**. SubtitleSmith will process your queue and automatically save the outputs in the exact same folder as your original media!
+5. **Process:** Click **Start Processing**. SubtitleSmith will process your queue and automatically save the outputs in the exact same folder as your original media! The **Queue** tab shows each file as waiting, in progress, done or failed, and the status bar estimates the time left. **Cancel** stops straight away. Your settings are remembered for next time (in `%APPDATA%\SubtitleSmith\settings.json`).
 
 ---
 <img width="1222" height="957" alt="image" src="https://github.com/user-attachments/assets/923db541-22ff-41c7-a457-447769c23c5c" />
@@ -88,6 +88,8 @@ The app is created in `dist\SubtitleSmith\` (run `SubtitleSmith.exe`). The folde
 | `writers.py` | Formats the results as `.srt`, `.vtt` or `.txt`. |
 | `video.py` | Adds subtitles to a copy of a video with FFmpeg: as a switchable track, or burned in. |
 | `languages.py` | Language names, subtitle track labels and line lengths per language. |
+| `progress.py` | The queue list and the time-left estimate. |
+| `settings.py` | Remembers your choices between launches. |
 | `hardware.py` | The hardware scan and model recommendations. |
 | `errors.py` | Error types shared by the modules above. |
 | `tests/` | Tests that run without a GPU or a model download. |

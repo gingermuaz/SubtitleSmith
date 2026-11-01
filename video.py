@@ -3,9 +3,11 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 
 import languages
-from errors import ProcessingError
+from errors import ProcessCancelled, ProcessingError
 
 VIDEO_EXTS = ('.mp4', '.mkv', '.avi', '.mov')
 
@@ -19,6 +21,7 @@ NVENC = ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", "-b:v
 
 _NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
 _nvenc_listed = None
+_running = set()  # FFmpeg processes in progress, so closing the window can stop them
 
 
 def ffmpeg_available():
@@ -40,27 +43,73 @@ def nvenc_listed():
     return _nvenc_listed
 
 
-def _run_ffmpeg(args, cwd=None):
-    return subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"] + args, cwd=cwd,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=_NO_WINDOW)
+def _run_ffmpeg(args, cwd=None, cancel_check=None, on_progress=None):
+    """Runs FFmpeg, stopping it if cancel_check() becomes true (raises ProcessCancelled).
+
+    on_progress(seconds) is called with how far into the video FFmpeg has got.
+    """
+    if cancel_check and cancel_check():
+        raise ProcessCancelled()
+    command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-nostdin", "-nostats",
+               "-progress", "pipe:1"] + args
+    with tempfile.TemporaryFile() as errors:  # a file, so a chatty FFmpeg can't fill a pipe and stall
+        process = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=errors, creationflags=_NO_WINDOW)
+        _running.add(process)
+        reader = threading.Thread(target=_read_progress, args=(process.stdout, on_progress), daemon=True)
+        reader.start()
+        try:
+            while process.poll() is None:
+                if cancel_check and cancel_check():
+                    process.kill()
+                    process.wait()
+                    raise ProcessCancelled()
+                time.sleep(0.2)
+        finally:
+            _running.discard(process)
+            reader.join(timeout=5)
+        errors.seek(0)
+        return subprocess.CompletedProcess(command, process.returncode, b"", errors.read())
+
+
+def _read_progress(stdout, on_progress):
+    """Reads FFmpeg's -progress lines (key=value), passing the position in seconds to on_progress."""
+    for raw in stdout:
+        key, _, value = raw.decode("utf-8", errors="replace").strip().partition("=")
+        if on_progress and key in ("out_time_us", "out_time_ms") and value.lstrip("-").isdigit():
+            on_progress(max(0, int(value)) / 1_000_000)  # both are microseconds (out_time_ms is misnamed)
+
+
+def stop_all():
+    """Stops any FFmpeg still running, e.g. when the window is closed in the middle of a burn-in."""
+    for process in list(_running):
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _remove(partial_video):
+    """Removes our half-written file. Any earlier finished video is left alone."""
+    if os.path.exists(partial_video):
+        os.remove(partial_video)
 
 
 def _failed(process, partial_video, what):
-    """Removes our half-written file (any earlier finished video is left alone) and raises a readable error."""
-    if os.path.exists(partial_video):
-        os.remove(partial_video)
+    """Removes our half-written file and raises a readable error."""
+    _remove(partial_video)
     lines = [line.strip() for line in process.stderr.decode('utf-8', errors='replace').splitlines()
              if line.strip() and line.strip() != "Conversion failed!"]
     detail = " ".join(lines[-2:]) if lines else f"FFmpeg exit code {process.returncode}"
     raise ProcessingError(f"Subtitles saved, but {what} failed: {detail}")
 
 
-def add_subtitle_track(video_path, subtitle_file, language="und"):
+def add_subtitle_track(video_path, subtitle_file, language="und", cancel_check=None, on_progress=None):
     """Copies the video with the subtitles added as a track viewers can switch on and off. Returns its path.
 
     Nothing is re-encoded, so this takes seconds. The copy is saved next to the subtitle file as
     <video name>_subtitled.<ext> (AVI becomes .mkv). The new track is first and on by default,
-    and is labelled with the subtitle language.
+    and is labelled with the subtitle language. Raises ProcessCancelled if cancel_check() becomes true.
     """
     if not ffmpeg_available():
         raise ProcessingError("Subtitles saved, but FFmpeg isn't installed, so they couldn't be added to the video.")
@@ -83,19 +132,24 @@ def add_subtitle_track(video_path, subtitle_file, language="und"):
              "-metadata:s:s:0", f"{'title' if out_ext == '.mkv' else 'handler_name'}={languages.name(language)}",
              "-disposition:s", "0", "-disposition:s:0", "default",  # ours is the one players switch on
              partial_video]
-    process = _run_ffmpeg(args)
+    try:
+        process = _run_ffmpeg(args, cancel_check=cancel_check, on_progress=on_progress)
+    except ProcessCancelled:
+        _remove(partial_video)
+        raise
     if process.returncode != 0:
         _failed(process, partial_video, "adding them to the video")
     os.replace(partial_video, output_video)
     return output_video
 
 
-def burn_subtitles(video_path, subtitle_file):
+def burn_subtitles(video_path, subtitle_file, cancel_check=None, on_progress=None):
     """Re-encodes the video with the subtitles drawn on. Returns (new video's path, True if the GPU encoded it).
 
     The new video is saved next to the subtitle file as <video name>_hardcoded.mp4. NVIDIA's encoder
     (NVENC) is tried first because it's much faster; if FFmpeg can't use it, FFmpeg's standard CPU
-    encoder is used instead.
+    encoder is used instead. on_progress(seconds) reports how far the encode has got, and it raises
+    ProcessCancelled if cancel_check() becomes true.
     """
     if not ffmpeg_available():
         raise ProcessingError("Subtitles saved, but FFmpeg isn't installed, so they couldn't be burned in.")
@@ -115,7 +169,12 @@ def burn_subtitles(video_path, subtitle_file):
         args = ["-i", video_path, "-vf", f"subtitles={sub_name}", "-pix_fmt", "yuv420p", "-c:a", "copy"]
         encoders = ([NVENC] if nvenc_listed() else []) + [[]]  # [] = FFmpeg's default CPU encoder
         for encoder in encoders:
-            process = _run_ffmpeg(args + encoder + [partial_video], cwd=temp_dir)
+            try:
+                process = _run_ffmpeg(args + encoder + [partial_video], cwd=temp_dir,
+                                      cancel_check=cancel_check, on_progress=on_progress)
+            except ProcessCancelled:
+                _remove(partial_video)
+                raise
             if process.returncode == 0:
                 break
 

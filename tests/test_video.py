@@ -3,11 +3,13 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
 import video
-from errors import ProcessingError
+from errors import ProcessCancelled, ProcessingError
 
 SRT = "1\n00:00:00,500 --> 00:00:05,000\nHELLO SUBTITLES\n\n"
 HAVE_FFMPEG = video.ffmpeg_available() and shutil.which("ffprobe") is not None
@@ -153,6 +155,44 @@ class SubtitleTrackTests(FFmpegTestCase):
         with open(earlier) as f:
             self.assertEqual(f.read(), "earlier finished video")
         self.assertFalse(os.path.exists(os.path.join(self.folder, "broken_subtitled.partial.mp4")))
+
+
+class StoppingTests(FFmpegTestCase):
+    def long_film(self):
+        film = os.path.join(self.folder, "long.mp4")
+        ffmpeg("-f", "lavfi", "-i", "testsrc2=s=1280x720:d=60", "-c:v", "libx264", "-preset", "ultrafast", film)
+        return film
+
+    def test_cancel_stops_ffmpeg_and_removes_the_half_written_video(self):
+        positions = []
+        with self.assertRaises(ProcessCancelled):
+            video.burn_subtitles(self.long_film(), self.subs, cancel_check=lambda: bool(positions),
+                                 on_progress=positions.append)  # cancel at the first progress report
+        self.assertLess(positions[-1], 60)
+        self.assertEqual([n for n in os.listdir(os.path.dirname(self.subs)) if n.endswith(".mp4")], [])
+        self.assertEqual(video._running, set(), "no FFmpeg left running")
+
+    def test_progress_is_reported(self):
+        film = os.path.join(self.folder, "clip.mp4")
+        make_video(film)
+        positions = []
+        video.burn_subtitles(film, self.subs, on_progress=positions.append)
+        self.assertGreaterEqual(positions[-1], 5.5)
+        self.assertEqual(positions, sorted(positions))
+
+    def test_stop_all_stops_running_ffmpeg(self):
+        film = self.long_film()
+        outcome = {}
+        worker = threading.Thread(target=lambda: outcome.update(
+            result=video._run_ffmpeg(["-i", film, "-c:v", "libx264", os.path.join(self.folder, "out.mp4")])))
+        worker.start()
+        while not video._running and worker.is_alive():
+            time.sleep(0.05)
+        time.sleep(0.3)
+        video.stop_all()
+        worker.join(10)
+        self.assertFalse(worker.is_alive())
+        self.assertNotEqual(outcome["result"].returncode, 0)
 
 
 class BurnTests(FFmpegTestCase):

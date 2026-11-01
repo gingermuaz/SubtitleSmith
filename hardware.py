@@ -40,7 +40,7 @@ def get_advanced_ram_info(fallback_gb):
                 "Write-Output \"$($sticks.Count),$slots,$speed,$form\""
             )
             output = subprocess.check_output(['powershell', '-NoProfile', '-Command', ps_cmd], encoding='utf-8',
-                                             creationflags=CREATE_NO_WINDOW).strip()
+                                             creationflags=CREATE_NO_WINDOW, timeout=20).strip()
             if output:
                 stick_count, total_slots, speed, form_factor = output.split(',')
                 return f"{fallback_gb} GB ({stick_count}/{total_slots} Slots Filled | {form_factor} @ {speed} MT/s)"
@@ -94,7 +94,7 @@ def batch_size_for(vram_gb):
 
 def get_nvidia_gpus():
     """Returns [(index, name, vram_mb), ...] for every NVIDIA GPU, or [] if there are none."""
-    kwargs = {'encoding': 'utf-8'}
+    kwargs = {'encoding': 'utf-8', 'timeout': 15}  # a stuck driver shouldn't leave the scan hanging
     if IS_WINDOWS: kwargs['creationflags'] = CREATE_NO_WINDOW
     try:
         output = subprocess.check_output(

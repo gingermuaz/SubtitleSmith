@@ -1,13 +1,18 @@
 import inspect
 import os
+import shutil
+import subprocess
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace as NS
 from unittest import mock
 
 import faster_whisper
+from huggingface_hub.errors import LocalEntryNotFoundError
 
 import engine
+from errors import ProcessingError
 
 SEGMENTS = [NS(start=0.5, end=2.5, text=" Hello there.", words=None),
             NS(start=3.0, end=6.0, text=" Second line.", words=None)]
@@ -24,13 +29,16 @@ class FakeModel:
     """Stands in for faster_whisper.WhisperModel, so tests need no model download or GPU."""
     loads = []
     language, probability, error = "fr", 0.97, None
+    load_seconds = transcribe_seconds = 0
 
     def __init__(self, name, device, device_index, compute_type):
+        time.sleep(FakeModel.load_seconds)
         FakeModel.loads.append((name, device, device_index, compute_type))
         self.calls = []
 
     def transcribe(self, path, **kwargs):
         self.calls.append((path, kwargs))
+        time.sleep(FakeModel.transcribe_seconds)
         if FakeModel.error:
             raise FakeModel.error
         return iter(SEGMENTS), info(kwargs, FakeModel.language, FakeModel.probability)
@@ -59,9 +67,11 @@ class EngineTestCase(unittest.TestCase):
         engine._loaded.update(key=None, model=None)
         FakeModel.loads.clear()
         FakeModel.language, FakeModel.probability, FakeModel.error = "fr", 0.97, None
+        FakeModel.load_seconds = FakeModel.transcribe_seconds = 0
         FakeBatched.calls.clear()
         FakeBatched.errors = {}
-        for name, fake in (("WhisperModel", FakeModel), ("BatchedInferencePipeline", FakeBatched)):
+        for name, fake in (("WhisperModel", FakeModel), ("BatchedInferencePipeline", FakeBatched),
+                           ("model_folder", lambda size, *args: f"folder:{engine.MODEL_REPOS.get(size, size)}")):
             patcher = mock.patch.object(engine, name, fake)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -94,13 +104,15 @@ class ModelLoadingTests(EngineTestCase):
         engine.get_model("small")
         engine.get_model("medium")
         engine.get_model("medium", "cpu")
-        self.assertEqual([load[:2] for load in FakeModel.loads], [("small", "auto"), ("medium", "auto"), ("medium", "cpu")])
+        self.assertEqual([load[:2] for load in FakeModel.loads],
+                         [("folder:Systran/faster-whisper-small", "auto"), ("folder:Systran/faster-whisper-medium", "auto"),
+                          ("folder:Systran/faster-whisper-medium", "cpu")])
 
     def test_compute_types_and_repo_names(self):
         engine.get_model("large-v3-turbo", "auto", device_index=1)
         engine.get_model("tiny", "cpu")
-        self.assertEqual(FakeModel.loads[0], ("deepdml/faster-whisper-large-v3-turbo-ct2", "auto", 1, "int8_float16"))
-        self.assertEqual(FakeModel.loads[1], ("tiny", "cpu", 0, "int8"))
+        self.assertEqual(FakeModel.loads[0], ("folder:deepdml/faster-whisper-large-v3-turbo-ct2", "auto", 1, "int8_float16"))
+        self.assertEqual(FakeModel.loads[1], ("folder:Systran/faster-whisper-tiny", "cpu", 0, "int8"))
 
 
 class TranscriptionSettingsTests(EngineTestCase):
@@ -160,7 +172,7 @@ class FastModeTests(EngineTestCase):
     def test_out_of_memory_halves_the_batch(self):
         FakeBatched.errors = {16: OUT_OF_MEMORY, 8: OUT_OF_MEMORY}
         messages = []
-        result, output = self.run_file(batch_size=16, progress_callback=lambda c, t, m: messages.append(m))
+        result, output = self.run_file(batch_size=16, progress_callback=lambda *args: messages.append(args[2]))
         self.assertEqual([kwargs["batch_size"] for kwargs in FakeBatched.calls], [16, 8, 4])
         self.assertIn("Out of GPU memory, starting again with smaller batches (8)...", messages)
         self.assertTrue(os.path.exists(output))
@@ -207,12 +219,14 @@ class ResultTests(EngineTestCase):
             self.run_file(task="transcribe", readable_lines=False)
         self.assertEqual([c.args[3:] for c in write.call_args_list], [(True, 13), (True, 42), (False, 13)])
 
-    def test_progress_messages(self):
+    def test_progress_messages_and_stages(self):
         messages = []
-        self.run_file(task="translate", progress_callback=lambda cur, total, text: messages.append(text))
-        self.assertEqual(messages, ["Loading 'large-v3' model onto AUTO...", "Extracting audio and analyzing...",
-                                    "Translating from French... 41.7%", "Translating from French... 100.0%",
-                                    "Saving text file...", "Success! File saved."])
+        self.run_file(task="translate", progress_callback=lambda *args: messages.append((args[2], args[3])))
+        self.assertEqual(messages, [("Loading 'large-v3' model onto AUTO...", "load"),
+                                    ("Extracting audio and analyzing...", "prepare"),
+                                    ("Translating from French... 41.7%", "transcribe"),
+                                    ("Translating from French... 100.0%", "transcribe"),
+                                    ("Saving text file...", "save"), ("Success! File saved.", "done")])
 
     def test_cancel_raises_and_writes_nothing(self):
         with self.assertRaises(engine.ProcessCancelled):
@@ -231,8 +245,21 @@ class VideoOutputTests(EngineTestCase):
         film, output = self.make_film()
         with mock.patch.object(engine.video, "burn_subtitles", return_value=("film_hardcoded.mp4", True)) as burn:
             result = engine.process_file(film, output, video_output="burn")
-        burn.assert_called_once_with(film, output)
+        self.assertEqual(burn.call_args.args, (film, output))
         self.assertEqual((result["video_file"], result["notes"]), ("film_hardcoded.mp4", []))
+
+    def test_burn_in_reports_progress_and_can_be_cancelled(self):
+        film, output = self.make_film()
+        messages, cancel = [], lambda: False
+
+        def fake_burn(media, subs, cancel_check, on_progress):
+            on_progress(3.0)  # halfway through the 6-second film
+            self.assertIs(cancel_check, cancel)
+            return "film_hardcoded.mp4", True
+        with mock.patch.object(engine.video, "burn_subtitles", side_effect=fake_burn):
+            engine.process_file(film, output, video_output="burn", cancel_check=cancel,
+                                progress_callback=lambda *args: messages.append((args[2], args[3])))
+        self.assertIn(("Burning subtitles to video... 50%", "video"), messages)
 
     def test_burn_in_on_the_cpu_adds_a_note(self):
         film, output = self.make_film()
@@ -252,6 +279,118 @@ class VideoOutputTests(EngineTestCase):
     def test_unknown_video_output(self):
         with self.assertRaises(ValueError):
             self.run_file(video_output="sideways")
+
+
+class CancelTests(EngineTestCase):
+    def test_cancel_while_the_model_loads_does_not_wait_for_it(self):
+        FakeModel.load_seconds = 1.0
+        started = time.monotonic()
+        with self.assertRaises(engine.ProcessCancelled):
+            engine.get_model("small", cancel_check=lambda: time.monotonic() - started > 0.1)
+        self.assertLess(time.monotonic() - started, 0.6)
+        # the load carries on in the background and is kept, so next time is instant
+        time.sleep(1.2)
+        self.assertEqual(len(FakeModel.loads), 1)
+        engine.get_model("small")
+        self.assertEqual(len(FakeModel.loads), 1)
+
+    def test_cancel_while_the_audio_is_read(self):
+        FakeModel.transcribe_seconds = 1.0
+        engine.get_model("large-v3")
+        started = time.monotonic()
+        with self.assertRaises(engine.ProcessCancelled):
+            self.run_file(cancel_check=lambda: time.monotonic() - started > 0.1)
+        self.assertLess(time.monotonic() - started, 0.6)
+
+
+class FakeHub:
+    """Stands in for huggingface_hub: one model repository whose files 'download' through the given progress bar."""
+
+    def __init__(self, folder, cached=False, offline=False, fail_on=None):
+        self.folder, self.cached, self.offline, self.fail_on = folder, cached, offline, fail_on
+        self.files = {"config.json": 10, "model.bin": 3000, "tokenizer.json": 20, "vocabulary.txt": 5, "README.md": 7}
+        self.downloads, self.api_calls = [], 0
+
+    def snapshot_download(self, repo_id, allow_patterns, local_files_only):
+        if not self.cached:
+            raise LocalEntryNotFoundError("not downloaded")
+        return self.folder
+
+    def HfApi(self):
+        def model_info(repo_id, files_metadata):
+            self.api_calls += 1
+            if self.offline:
+                raise ConnectionError("no route to host")
+            return NS(siblings=[NS(rfilename=name, size=size) for name, size in self.files.items()])
+        return NS(model_info=model_info)
+
+    def hf_hub_download(self, repo_id, filename, tqdm_class):
+        if filename == self.fail_on:
+            raise OSError("connection reset")
+        size = self.files[filename]
+        with tqdm_class(total=size, initial=0, desc=filename, unit="B") as bar:
+            for start in range(0, size, 1000):
+                bar.update(min(1000, size - start))
+        self.downloads.append(filename)
+        return os.path.join(self.folder, filename)
+
+
+class DownloadTests(unittest.TestCase):
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.folder = self._temp.name
+
+    def download(self, hub, cancel_check=None):
+        events = []
+        with mock.patch.object(engine, "huggingface_hub", hub):
+            result = engine.model_folder("large-v3", lambda *args: events.append(args), cancel_check)
+        return result, events
+
+    def test_already_downloaded_model_needs_no_network(self):
+        open(os.path.join(self.folder, "model.bin"), "w").close()
+        hub = FakeHub(self.folder, cached=True)
+        folder, events = self.download(hub)
+        self.assertEqual((folder, hub.downloads, hub.api_calls, events), (self.folder, [], 0, []))
+
+    def test_downloads_the_needed_files_with_progress(self):
+        hub = FakeHub(self.folder)
+        folder, events = self.download(hub)
+        self.assertEqual(folder, self.folder)
+        self.assertEqual(hub.downloads, ["config.json", "model.bin", "tokenizer.json", "vocabulary.txt"])
+        self.assertEqual({event[3] for event in events}, {"download"})
+        self.assertEqual(events[-1][:2], (3035, 3035))
+        self.assertIn("Downloading the 'large-v3' AI model (first use only)", events[-1][2])
+        self.assertTrue(all(a[0] <= b[0] for a, b in zip(events, events[1:])), "progress only goes up")
+
+    def test_partly_downloaded_model_is_completed(self):
+        hub = FakeHub(self.folder, cached=True)  # cache entry exists but model.bin is missing
+        self.download(hub)
+        self.assertIn("model.bin", hub.downloads)
+
+    def test_cancel_stops_the_download(self):
+        hub = FakeHub(self.folder)
+        with self.assertRaises(engine.ProcessCancelled):
+            self.download(hub, cancel_check=lambda: len(hub.downloads) >= 1)  # cancel during model.bin
+        self.assertEqual(hub.downloads, ["config.json"])
+
+    def test_no_internet(self):
+        with self.assertRaisesRegex(ProcessingError, "needs an internet connection"):
+            self.download(FakeHub(self.folder, offline=True))
+
+    def test_download_failing_part_way(self):
+        with self.assertRaisesRegex(ProcessingError, "carries on from where it stopped"):
+            self.download(FakeHub(self.folder, fail_on="model.bin"))
+
+
+@unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg isn't installed")
+class MediaDurationTests(unittest.TestCase):
+    def test_reads_the_length(self):
+        with tempfile.TemporaryDirectory() as folder:
+            clip = os.path.join(folder, "clip.mp3")
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=d=3", clip], check=True)
+            self.assertAlmostEqual(engine.media_duration(clip), 3.0, delta=0.1)
+            self.assertIsNone(engine.media_duration(os.path.join(folder, "missing.mp4")))
 
 
 if __name__ == "__main__":
