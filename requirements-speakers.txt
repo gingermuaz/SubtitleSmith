@@ -1,0 +1,11 @@
+# Optional: speaker labels ("Speaker 1:", "Speaker 2:") with pyannote.audio. Adds PyTorch (a few GB).
+#
+# For GPU speed, first install PyTorch with CUDA support using the command from
+# https://pytorch.org/get-started/locally/ (otherwise pip installs the CPU version, which works but
+# is slower). Then:
+#
+#   python -m pip install -r requirements-speakers.txt
+#
+# The first time you use speaker labels, SubtitleSmith asks for a free Hugging Face access token
+# (see "Speaker Labels" in README.md).
+pyannote.audio==4.0.4

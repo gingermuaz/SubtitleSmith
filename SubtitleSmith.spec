@@ -18,6 +18,16 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 binaries += collect_dynamic_libs('nvidia.cublas')
 binaries += collect_dynamic_libs('nvidia.cudnn')
 
+# Speaker labels are optional: they're bundled only if pyannote.audio is installed where you build,
+# which makes the app several GB bigger (PyTorch). speakers.py imports them on demand, so they're listed here.
+import importlib.util
+if importlib.util.find_spec("pyannote.audio"):
+    for package in ("pyannote.audio", "pyannote.core", "pyannote.pipeline", "pyannote.database", "pyannote.metrics",
+                    "lightning", "lightning_fabric", "asteroid_filterbanks", "torch_audiomentations"):
+        tmp_ret = collect_all(package)
+        datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+    hiddenimports += ["torch", "torchaudio"]
+
 
 a = Analysis(
     ['GUI.py'],

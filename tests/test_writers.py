@@ -130,5 +130,45 @@ class RenderTests(unittest.TestCase):
                 self.assertIn("Café – 日本語", f.read())
 
 
+class EmptySubtitleTests(unittest.TestCase):
+    def test_empty_segments_make_no_subtitle(self):
+        text = writers.render([segment("Hi", 0.0), NS(start=2, end=3, text=" ", words=None), segment("Bye", 4.0)],
+                              ".srt", readable_lines=False)
+        self.assertEqual(text.count(" --> "), 2)
+        self.assertTrue(text.startswith("1\n") and "\n2\n" in text)
+
+
+class ProblemTests(unittest.TestCase):
+    GOOD = writers.render([segment("Hello there, friend.", 0.5), segment("Second line", 3.0)], ".srt")
+
+    def test_our_own_output_has_no_problems(self):
+        self.assertEqual(writers.problems(self.GOOD, ".srt"), [])
+        vtt = writers.render([segment("Hello there.", 0.5)], ".vtt")
+        self.assertEqual(writers.problems(vtt, ".vtt"), [])
+
+    def test_text_edits_are_fine(self):
+        edited = self.GOOD.replace("Hello there, friend.", "Howdy partner,\nhow are you?")
+        self.assertEqual(writers.problems(edited, ".srt"), [])
+
+    def test_broken_timing(self):
+        found = writers.problems(self.GOOD.replace("00:00:00,500 -->", "0:00:00.5 -->"), ".srt")
+        self.assertIn("Subtitle 1: the timing line", found[0])
+
+    def test_missing_number_and_text(self):
+        found = writers.problems("00:00:01,000 --> 00:00:02,000\nHi\n\n2\n00:00:03,000 --> 00:00:04,000\n", ".srt")
+        self.assertEqual(found, ["Subtitle 1 should start with its number on its own line.", "Subtitle 2 has no text."])
+
+    def test_ends_before_it_starts(self):
+        found = writers.problems("1\n00:00:05,000 --> 00:00:02,000\nHi\n", ".srt")
+        self.assertEqual(found, ["Subtitle 1 ends before it starts."])
+
+    def test_vtt_header(self):
+        self.assertEqual(writers.problems("1\n00:00:01.000 --> 00:00:02.000\nHi\n", ".vtt"),
+                         ["The first line must be WEBVTT."])
+
+    def test_txt_is_never_a_problem(self):
+        self.assertEqual(writers.problems("anything", ".txt"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

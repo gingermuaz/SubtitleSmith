@@ -197,7 +197,8 @@ class FastModeTests(EngineTestCase):
 class ResultTests(EngineTestCase):
     def test_writes_subtitles_and_returns_result(self):
         result, output = self.run_file("out.srt")
-        self.assertEqual(result, {"subtitle_file": output, "video_file": None, "notes": [],
+        self.assertEqual(result, {"subtitle_file": output, "extra_files": [], "extra_languages": [], "video_file": None,
+                                  "notes": [],
                                   "language": "fr", "language_probability": 0.97, "language_detected": True})
         with open(output, encoding="utf-8") as f:
             self.assertTrue(f.read().startswith("1\n00:00:00,500 --> 00:00:02,500\nHello there.\n\n2\n"))
@@ -213,11 +214,11 @@ class ResultTests(EngineTestCase):
 
     def test_line_length_follows_the_subtitle_language(self):
         FakeModel.language = "ja"
-        with mock.patch.object(engine.writers, "write") as write:
+        with mock.patch.object(engine.writers, "render", return_value="") as render:
             self.run_file(task="transcribe")  # Japanese subtitles
             self.run_file(task="translate")  # English subtitles
             self.run_file(task="transcribe", readable_lines=False)
-        self.assertEqual([c.args[3:] for c in write.call_args_list], [(True, 13), (True, 42), (False, 13)])
+        self.assertEqual([c.args[2:] for c in render.call_args_list], [(True, 13), (True, 42), (False, 13)])
 
     def test_progress_messages_and_stages(self):
         messages = []
@@ -252,7 +253,7 @@ class VideoOutputTests(EngineTestCase):
         film, output = self.make_film()
         messages, cancel = [], lambda: False
 
-        def fake_burn(media, subs, cancel_check, on_progress):
+        def fake_burn(media, subs, cancel_check, on_progress, style):
             on_progress(3.0)  # halfway through the 6-second film
             self.assertIs(cancel_check, cancel)
             return "film_hardcoded.mp4", True
@@ -270,11 +271,11 @@ class VideoOutputTests(EngineTestCase):
     def test_subtitle_track_is_labelled_with_the_subtitle_language(self):
         FakeModel.language = "ja"
         film, output = self.make_film()
-        with mock.patch.object(engine.video, "add_subtitle_track", return_value="film_subtitled.mkv") as track:
+        with mock.patch.object(engine.video, "add_subtitle_tracks", return_value="film_subtitled.mkv") as track:
             result = engine.process_file(film, output, task="transcribe", video_output="track")
             engine.process_file(film, output, task="translate", video_output="track")
         self.assertEqual(result["video_file"], "film_subtitled.mkv")
-        self.assertEqual([c.args for c in track.call_args_list], [(film, output, "ja"), (film, output, "en")])
+        self.assertEqual([c.args for c in track.call_args_list], [(film, [(output, "ja")]), (film, [(output, "en")])])
 
     def test_unknown_video_output(self):
         with self.assertRaises(ValueError):
@@ -391,6 +392,118 @@ class MediaDurationTests(unittest.TestCase):
             subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=d=3", clip], check=True)
             self.assertAlmostEqual(engine.media_duration(clip), 3.0, delta=0.1)
             self.assertIsNone(engine.media_duration(os.path.join(folder, "missing.mp4")))
+
+
+class FakeTranslator:
+    calls = []
+
+    def translate(self, texts, source, target, cancel_check=None, on_progress=None):
+        FakeTranslator.calls.append((source, target))
+        if on_progress:
+            on_progress(len(texts), len(texts))
+        return [f"[{target}] {text.strip()}" for text in texts]
+
+
+class TranslationAndExtrasTests(EngineTestCase):
+    def setUp(self):
+        super().setUp()
+        FakeTranslator.calls.clear()
+        patcher = mock.patch.object(engine, "get_translator", return_value=FakeTranslator())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def read(self, path):
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_original_plus_english(self):
+        result, output = self.run_file(task="transcribe", also_english=True)
+        english = os.path.join(self.folder, "out.en.srt")
+        self.assertEqual(result["extra_files"], [english])
+        self.assertEqual(FakeTranslator.calls, [("fr", "en")])
+        self.assertIn("Hello there.", self.read(output))
+        self.assertIn("[en] Hello there.", self.read(english))
+
+    def test_translate_to_another_language_as_well(self):
+        result, output = self.run_file(task="transcribe", also_english=True, translate_to="bn")
+        self.assertEqual([os.path.basename(p) for p in result["extra_files"]], ["out.en.srt", "out.bn.srt"])
+        self.assertEqual(FakeTranslator.calls, [("fr", "en"), ("fr", "bn")])  # both from the original
+
+    def test_english_main_subtitles_translated_onwards(self):
+        self.run_file(task="translate", translate_to="es")
+        self.assertEqual(FakeTranslator.calls, [("en", "es")])
+
+    def test_no_duplicate_when_already_in_that_language(self):
+        FakeModel.language = "en"
+        result, _ = self.run_file(task="transcribe", also_english=True)
+        self.assertEqual((result["extra_files"], FakeTranslator.calls), ([], []))
+        self.assertIn("already in English", result["notes"][0])
+
+    def test_translation_problem_is_a_note_not_a_failure(self):
+        with mock.patch.object(FakeTranslator, "translate", side_effect=ProcessingError("can't translate Latin")):
+            result, output = self.run_file(task="transcribe", translate_to="la")
+        self.assertTrue(os.path.exists(output))
+        self.assertIn("No Latin subtitles: can't translate Latin", result["notes"][0])
+
+    def test_translated_subtitles_use_that_language_line_length(self):
+        with mock.patch.object(engine.writers, "render", return_value="") as render:
+            self.run_file(task="transcribe", translate_to="ja")
+        self.assertEqual([c.args[3] for c in render.call_args_list], [42, 13])
+
+    def test_every_language_becomes_a_video_track(self):
+        film, output = self.make_film()
+        with mock.patch.object(engine.video, "add_subtitle_tracks", return_value="x") as tracks:
+            engine.process_file(film, output, task="transcribe", also_english=True, video_output="track")
+        self.assertEqual(tracks.call_args.args[1], [(output, "fr"), (os.path.join(self.folder, "film.en.srt"), "en")])
+
+    def test_review_can_edit_before_saving(self):
+        seen = {}
+
+        def review(texts):
+            seen.update(texts)
+            return {path: text.replace("Hello", "Howdy") for path, text in texts.items()}
+        result, output = self.run_file(task="transcribe", also_english=True, review=review)
+        self.assertEqual(sorted(map(os.path.basename, seen)), ["out.en.srt", "out.srt"])
+        self.assertIn("Howdy there.", self.read(output))
+        self.assertIn("[en] Howdy there.", self.read(result["extra_files"][0]))
+
+    def test_review_cancelled_saves_nothing(self):
+        with self.assertRaises(engine.ProcessCancelled):
+            self.run_file("never.srt", review=lambda texts: None)
+        self.assertFalse(os.path.exists(os.path.join(self.folder, "never.srt")))
+
+    def test_speaker_labels(self):
+        turns = [(0.0, 2.6, "SPEAKER_07"), (2.8, 6.0, "SPEAKER_02")]
+        with mock.patch.object(engine.speakers, "find_speakers", return_value=turns) as find:
+            result, output = self.run_file(task="transcribe", speaker_labels=True, num_speakers=2, also_english=True)
+        self.assertEqual(find.call_args.args[2], 2)
+        self.assertIn("Speaker 1: Hello there.", self.read(output))
+        self.assertIn("Speaker 2: Second line.", self.read(output))
+        self.assertIn("Speaker 2: [en] Second line.", self.read(result["extra_files"][0]))
+
+    def test_speaker_problem_is_a_note(self):
+        with mock.patch.object(engine.speakers, "find_speakers", side_effect=ProcessingError("token missing")):
+            result, output = self.run_file(speaker_labels=True)
+        self.assertIn("No speaker labels: token missing", result["notes"][0])
+        self.assertNotIn("Speaker", self.read(output))
+
+    def test_burn_style_is_passed_on(self):
+        film, output = self.make_film()
+        style = {"size": "Large", "colour": "Yellow", "position": "Top"}
+        with mock.patch.object(engine.video, "burn_subtitles", return_value=("x", True)) as burn:
+            engine.process_file(film, output, video_output="burn", burn_style=style)
+        self.assertEqual(burn.call_args.kwargs["style"], style)
+
+    def test_prepare_loads_only_what_is_needed(self):
+        with mock.patch.object(engine.speakers, "get_pipeline") as pipeline:
+            engine.prepare("small")
+            self.assertEqual(len(engine.get_translator.call_args_list), 0)
+            engine.prepare("small", translate=True, speaker_labels=True, compute_device="cpu")
+        self.assertEqual(len(engine.get_translator.call_args_list), 1)
+        self.assertIs(pipeline.call_args.args[0], False)  # CPU chosen: no GPU for speakers either
+
+    def test_extra_output_path(self):
+        self.assertEqual(engine.extra_output_path("C:/a/film_subtitle.srt", "en"), "C:/a/film_subtitle.en.srt")
 
 
 if __name__ == "__main__":

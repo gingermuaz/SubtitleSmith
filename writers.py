@@ -3,6 +3,7 @@
 A segment is anything with .start and .end (seconds), .text and .words: a list of items with
 .start, .end and .word, or None. faster-whisper's segments look like this.
 """
+import re
 from dataclasses import dataclass
 
 FORMATS = (".srt", ".vtt", ".txt")
@@ -151,6 +152,7 @@ def render(segments, output_format=".srt", readable_lines=True, max_chars=42):
     else:
         cues = [Cue(segment.start, segment.end, [segment.text.strip()]) for segment in segments]
 
+    cues = [cue for cue in cues if any(line.strip() for line in cue.lines)]  # nothing to show, so no subtitle
     is_vtt = output_format == ".vtt"
     blocks = ["WEBVTT\n\n"] if is_vtt else []
     for index, cue in enumerate(cues, start=1):
@@ -162,5 +164,48 @@ def render(segments, output_format=".srt", readable_lines=True, max_chars=42):
 
 def write(path, segments, output_format=".srt", readable_lines=True, max_chars=42):
     """Saves the segments to path as UTF-8 text."""
+    save_text(path, render(segments, output_format, readable_lines, max_chars))
+
+
+def save_text(path, text):
     with open(path, "w", encoding="utf-8") as f:
-        f.write(render(segments, output_format, readable_lines, max_chars))
+        f.write(text)
+
+
+_SRT_TIMING = re.compile(r"^(\d{2}):(\d{2}):(\d{2}),(\d{3}) --> (\d{2}):(\d{2}):(\d{2}),(\d{3})$")
+_VTT_TIMING = re.compile(r"^(?:(\d{2,}):)?(\d{2}):(\d{2})\.(\d{3}) --> (?:(\d{2,}):)?(\d{2}):(\d{2})\.(\d{3})(?: .*)?$")
+
+
+def _seconds(parts):
+    hours, minutes, secs, millis = (int(p or 0) for p in parts)
+    return hours * 3600 + minutes * 60 + secs + millis / 1000
+
+
+def problems(text, output_format):
+    """Mistakes in hand-edited subtitles that would stop players or FFmpeg reading them ([] if none)."""
+    if output_format not in (".srt", ".vtt"):
+        return []
+    found = []
+    blocks = [block for block in re.split(r"\n[ \t]*\n", text.replace("\r\n", "\n").strip()) if block.strip()]
+    if output_format == ".vtt":
+        if not blocks or not blocks[0].startswith("WEBVTT"):
+            found.append("The first line must be WEBVTT.")
+        blocks = blocks[1:]
+    timing_form = "00:00:01,000 --> 00:00:02,500" if output_format == ".srt" else "00:00:01.000 --> 00:00:02.500"
+    pattern = _SRT_TIMING if output_format == ".srt" else _VTT_TIMING
+    for n, block in enumerate(blocks, start=1):
+        lines = [line.strip() for line in block.split("\n")]
+        timing_index = next((i for i, line in enumerate(lines[:2]) if "-->" in line), None)
+        if timing_index is None:
+            found.append(f"Subtitle {n} has no timing line (like {timing_form}).")
+            continue
+        match = pattern.match(lines[timing_index])
+        if not match:
+            found.append(f"Subtitle {n}: the timing line \"{lines[timing_index]}\" should look like {timing_form}.")
+        elif _seconds(match.groups()[4:8]) < _seconds(match.groups()[:4]):
+            found.append(f"Subtitle {n} ends before it starts.")
+        if output_format == ".srt" and (timing_index != 1 or not lines[0].isdigit()):
+            found.append(f"Subtitle {n} should start with its number on its own line.")
+        if timing_index == len(lines) - 1:
+            found.append(f"Subtitle {n} has no text.")
+    return found

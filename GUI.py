@@ -17,11 +17,13 @@ if sys.stderr is None:
 import customtkinter as ctk
 from tkinterdnd2 import TkinterDnD, DND_FILES
 
+import dialogs
 import engine
 import hardware
 import languages
 import progress
 import settings
+import speakers
 import video
 
 # --- Configuration & Constants ---
@@ -47,16 +49,14 @@ MODELS = [
 FORMATS = [".srt", ".vtt", ".txt"]
 COMPUTE_OPTIONS = ["Auto (GPU if available)", "Force CPU"]
 
-SUPPORTED_MEDIA = (
-    '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm',
-    '.mp3', '.wav', '.aac', '.m4a', '.flac', '.ogg', '.wma'
-)
+SUPPORTED_MEDIA = engine.SUPPORTED_MEDIA
 
 AUTO_SAVE = "<Auto-save to original directories>"
 
 # Video menu label -> engine.process_file(video_output=...)
 VIDEO_OUTPUTS = {"Subtitles only": "none", "Add subtitle track": "track", "Burn into video": "burn"}
-TASKS = ["Translate to English", "Keep Original Language"]
+TASKS = ["Translate to English", "Keep Original Language", "Original + English"]
+TRANSLATE_TARGETS = ["None"] + [language for language in LANGUAGES if not language.startswith("Auto")]
 
 # Choices remembered between launches: settings key -> (variable on App, allowed values; None = on/off)
 REMEMBERED = {
@@ -64,7 +64,10 @@ REMEMBERED = {
     "format": ("format_var", FORMATS), "compute": ("compute_var", COMPUTE_OPTIONS),
     "vad_filter": ("vad_var", None), "fast_mode": ("fast_mode_var", None),
     "video": ("video_output_var", list(VIDEO_OUTPUTS)), "readable_lines": ("readable_lines_var", None),
-    "light_ui": ("theme_var", None),
+    "light_ui": ("theme_var", None), "translate_to": ("translate_to_var", TRANSLATE_TARGETS),
+    "speaker_labels": ("speaker_labels_var", None), "review": ("review_var", None),
+    "burn_size": ("burn_size_var", list(video.BURN_SIZES)), "burn_colour": ("burn_colour_var", list(video.BURN_COLOURS)),
+    "burn_position": ("burn_position_var", list(video.BURN_POSITIONS)),
 }
 
 QUEUE_COLOURS = {"waiting": "gray55", "working": "#3b8ed0", "done": "#28a745", "failed": "#dc3545",
@@ -126,6 +129,7 @@ class App:
         self.running = False
         self.model_chosen = False  # True once the model comes from saved settings or the user picks one
         self.batch_prefix = ""
+        self._review_dialog = None
         self.cancel_event = threading.Event()
         # Filled in by the hardware scan at startup; these defaults are used if the scan fails
         self.recommended_models = {"transcribe": "large-v3-turbo", "translate": "large-v3"}
@@ -146,7 +150,7 @@ class App:
             self.root.iconbitmap(resource_path("SubtitleSmith.ico"))
         except Exception:
             pass  # a missing icon shouldn't stop the app (and Linux can't use .ico files)
-        self.root.geometry("780x650")
+        self.root.geometry("780x690")
         self.root.resizable(False, False)
         self.root.attributes('-alpha', 1.0)
         try:
@@ -168,6 +172,12 @@ class App:
         self.video_output_var = ctk.StringVar(value="Subtitles only")
         self.fast_mode_var = ctk.BooleanVar(value=True)
         self.readable_lines_var = ctk.BooleanVar(value=True)
+        self.translate_to_var = ctk.StringVar(value="None")
+        self.speaker_labels_var = ctk.BooleanVar(value=False)
+        self.review_var = ctk.BooleanVar(value=False)
+        self.burn_size_var = ctk.StringVar(value="Medium")
+        self.burn_colour_var = ctk.StringVar(value="White")
+        self.burn_position_var = ctk.StringVar(value="Bottom")
         self.status_var = ctk.StringVar(value="Ready")
 
         self._apply_saved_settings()
@@ -224,12 +234,21 @@ class App:
         action_frame.grid(row=4, column=0, columnspan=4, pady=10)
         ctk.CTkLabel(action_frame, text="Action:").pack(side="left", padx=10)
         ctk.CTkSegmentedButton(action_frame, variable=self.task_var,
-                               values=["Translate to English", "Keep Original Language"],
-                               command=self.on_task_change, width=320).pack(side="left", padx=10)
+                               values=TASKS, command=self.on_task_change, width=460).pack(side="left", padx=10)
 
-        # 5. Advanced Settings Row 1
+        # 5. More languages, speakers, review
+        extras_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        extras_frame.grid(row=5, column=0, columnspan=4, pady=(0, 8))
+        ctk.CTkLabel(extras_frame, text="Also translate to:").pack(side="left", padx=(0, 5))
+        ctk.CTkOptionMenu(extras_frame, variable=self.translate_to_var, values=TRANSLATE_TARGETS,
+                          width=170).pack(side="left", padx=(0, 20))
+        ctk.CTkSwitch(extras_frame, text="Speaker Labels", variable=self.speaker_labels_var).pack(side="left",
+                                                                                                padx=(0, 15))
+        ctk.CTkSwitch(extras_frame, text="Review Before Saving", variable=self.review_var).pack(side="left")
+
+        # 6. Advanced Settings Row 1
         adv_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        adv_frame.grid(row=5, column=0, columnspan=4, pady=(5, 0))
+        adv_frame.grid(row=6, column=0, columnspan=4, pady=(5, 0))
         ctk.CTkLabel(adv_frame, text="Format:").pack(side="left", padx=(0, 5))
         ctk.CTkOptionMenu(adv_frame, variable=self.format_var, values=FORMATS, width=70).pack(side="left",
                                                                                              padx=(0, 15))
@@ -239,27 +258,29 @@ class App:
         ctk.CTkSwitch(adv_frame, text="VAD Filter", variable=self.vad_var).pack(side="left", padx=(0, 15))
         ctk.CTkSwitch(adv_frame, text="Fast Mode", variable=self.fast_mode_var).pack(side="left")
 
-        # 6. Advanced Settings Row 2
+        # 7. Advanced Settings Row 2
         adv2_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        adv2_frame.grid(row=6, column=0, columnspan=4, pady=(5, 5))
+        adv2_frame.grid(row=7, column=0, columnspan=4, pady=(5, 5))
         ctk.CTkLabel(adv2_frame, text="Video:").pack(side="left", padx=(0, 5))
         ctk.CTkOptionMenu(adv2_frame, variable=self.video_output_var, values=list(VIDEO_OUTPUTS),
-                          width=170).pack(side="left", padx=(0, 20))
+                          width=170).pack(side="left", padx=(0, 5))
+        ctk.CTkButton(adv2_frame, text="Style\u2026", width=60, command=self.open_style_dialog).pack(side="left",
+                                                                                                 padx=(0, 20))
         ctk.CTkSwitch(adv2_frame, text="Readable Lines", variable=self.readable_lines_var).pack(side="left",
                                                                                               padx=(0, 20))
         ctk.CTkSwitch(adv2_frame, text="Light UI", variable=self.theme_var, command=self.toggle_theme).pack(side="left")
 
-        # 7. Status
+        # 8. Status
         status_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        status_frame.grid(row=7, column=0, columnspan=4, pady=(15, 0))
+        status_frame.grid(row=8, column=0, columnspan=4, pady=(15, 0))
         ctk.CTkLabel(status_frame, textvariable=self.status_var, text_color="gray").pack(pady=(0, 5))
         self.progress_bar = ctk.CTkProgressBar(status_frame, width=460)
         self.progress_bar.set(0)
         self.progress_bar.pack()
 
-        # 8. Buttons
+        # 9. Buttons
         button_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        button_frame.grid(row=8, column=0, columnspan=4, pady=(15, 10))
+        button_frame.grid(row=9, column=0, columnspan=4, pady=(15, 10))
         self.start_button = ctk.CTkButton(button_frame, text="Start Processing", command=self.start_process,
                                           fg_color="#28a745", hover_color="#218838")
         self.start_button.pack(side="left", padx=15)
@@ -267,9 +288,9 @@ class App:
                                            fg_color="#dc3545", hover_color="#c82333", state="disabled")
         self.cancel_button.pack(side="left", padx=15)
 
-        # 9. Queue and system info
+        # 10. Queue and system info
         self.tabs = ctk.CTkTabview(frame, width=620, height=185)
-        self.tabs.grid(row=9, column=0, columnspan=4, pady=(0, 10))
+        self.tabs.grid(row=10, column=0, columnspan=4, pady=(0, 10))
         monospace = ctk.CTkFont(family="Consolas" if platform.system() == "Windows" else "DejaVu Sans Mono", size=12)
         self.queue_box = ctk.CTkTextbox(self.tabs.add("Queue"), width=600, height=130, font=monospace, wrap="none")
         self.queue_box.pack(fill="both", expand=True)
@@ -347,6 +368,9 @@ class App:
 
     def current_task(self):
         return "translate" if "Translate" in self.task_var.get() else "transcribe"
+
+    def open_style_dialog(self):
+        dialogs.StyleDialog(self.root, self.burn_size_var, self.burn_colour_var, self.burn_position_var)
 
     def on_model_chosen(self, value=None):
         self.model_chosen = True
@@ -478,6 +502,10 @@ class App:
             return "Saving"
         if stage == "video":
             return "Adding track" if "track" in status_text else f"Burning {round(fraction * 100)}%"
+        if stage == "translate":
+            return f"Translating {round(fraction * 100)}%"
+        if stage == "speakers":
+            return f"Finding speakers {round(fraction * 100)}%"
         return None
 
     def update_gui_progress(self, current, total, status_text, stage=""):
@@ -488,10 +516,10 @@ class App:
         if self.eta and index is not None:
             if stage == "transcribe":
                 self.eta.progress(index, fraction)
-            elif stage in ("save", "video"):
+            elif stage in ("save", "video", "translate", "speakers"):
                 self.eta.progress(index, 1.0)
             left = self.eta.seconds_left(time.monotonic())
-            if left is not None and stage in ("prepare", "transcribe", "save", "video"):
+            if left is not None and stage in ("prepare", "transcribe", "save", "video", "translate", "speakers"):
                 display_text += f"  \u00b7  {progress.format_time_left(left)}"
         detail = self._working_detail(stage, fraction, status_text) if index is not None else None
 
@@ -547,8 +575,25 @@ class App:
                 return
             video_output = "none"
 
+        # Speaker labels need extra packages and a Hugging Face token: sort that out now
+        speaker_labels = self.speaker_labels_var.get()
+        if speaker_labels and not self._speaker_labels_ready():
+            return
+
         # Fast Mode: transcribe several pieces at once on the GPU, as many as its memory allows
         batch_size = hardware.batch_size_for(self.vram_gb) if self.fast_mode_var.get() and compute_code != "cpu" else 0
+        translate_to = self.translate_to_var.get()
+        job = dict(
+            model_size=model_sz, source_language=lang_code, task=task_code, compute_device=compute_code,
+            vad_filter=self.vad_var.get(), output_format=fmt, readable_lines=self.readable_lines_var.get(),
+            names_and_terms=self.names_entry.get().strip(), video_output=video_output, batch_size=batch_size,
+            also_english=self.task_var.get() == "Original + English",
+            translate_to=None if translate_to == "None" else translate_to.split("(")[-1].rstrip(")"),
+            speaker_labels=speaker_labels,
+            burn_style={"size": self.burn_size_var.get(), "colour": self.burn_colour_var.get(),
+                        "position": self.burn_position_var.get()},
+            review=self.review if self.review_var.get() else None,
+        )
 
         self._save_settings()
         self.queue = [progress.QueueItem(path) for path in self.selected_files]
@@ -562,16 +607,59 @@ class App:
 
         threading.Thread(
             target=self.run_queue,
-            args=(self.selected_files.copy(), lang_code, self.save_path_var.get(), model_sz, task_code, compute_code,
-                  self.vad_var.get(), fmt, video_output, self.readable_lines_var.get(),
-                  self.names_entry.get().strip(), batch_size),
+            args=(self.selected_files.copy(), self.save_path_var.get(), job),
             daemon=True
         ).start()
 
-    def run_queue(self, media_files, lang_code, save_val, model_sz, task_type, compute, vad, fmt, video_output,
-                  readable_lines, names_and_terms, batch_size=0):
-        """Worker thread: processes each file in turn, then shows a summary."""
+    def _speaker_labels_ready(self):
+        """Checks speaker labels can run, asking for the Hugging Face token if needed."""
+        if not speakers.available():
+            messagebox.showerror("Speaker Labels", "Speaker labels need extra packages (PyTorch and pyannote.audio, "
+                                                   f"a few GB). Install them with:\n\n{speakers.INSTALL_COMMAND}\n\n"
+                                                   "then start SubtitleSmith again.")
+            return False
+        if speakers.has_token():
+            return True
+        dialog = dialogs.TokenDialog(self.root)
+        self.root.wait_window(dialog)
+        if not dialog.token:
+            return False
+        try:
+            speakers.save_token(dialog.token)
+        except Exception as e:
+            messagebox.showerror("Speaker Labels", f"That token didn't work: {e}")
+            return False
+        return True
+
+    def review(self, texts):
+        """engine.process_file's review step. Runs on the worker thread: shows the review window and waits."""
+        done, outcome = threading.Event(), {}
+        index = self.current_index
+        title = self.queue[index].name if index is not None and index < len(self.queue) else ""
+
+        def finished(result):
+            outcome["texts"] = result
+            done.set()
+
+        def show():
+            self._review_dialog = dialogs.ReviewDialog(self.root, title, texts, finished)
+        if index is not None:
+            self._post_item(index, "working", "Waiting for your review")
+        self.root.after(0, lambda: self.status_var.set(f"{self.batch_prefix}Review the subtitles, then press Save and Continue."))
+        self.root.after(0, show)
+        waiting_since = time.monotonic()
+        while not done.wait(0.2):
+            if self.check_cancel():
+                self.root.after(0, lambda: self._review_dialog and self._review_dialog.finish(None))
+                return None
+        if self.eta and self.eta.started is not None:
+            self.eta.started += time.monotonic() - waiting_since  # time spent reviewing isn't processing time
+        return outcome.get("texts")
+
+    def run_queue(self, media_files, save_val, job):
+        """Worker thread: processes each file in turn, then shows a summary. job holds process_file's settings."""
         total_files = len(media_files)
+        compute, fmt = job["compute_device"], job["output_format"]
         device_index = 0 if compute == "cpu" else self.gpu_index
         succeeded, failed, notes, detected = [], [], [], []
         cancelled = False
@@ -579,10 +667,13 @@ class App:
         self.eta = progress.Eta([engine.media_duration(path) for path in media_files])  # quick: reads headers only
 
         try:
-            # Load the model once for the whole queue (downloading it on first use). If it won't load,
+            # Load the models once for the whole queue (downloading them on first use). If they won't load,
             # every file would fail the same way.
             try:
-                engine.get_model(model_sz, compute, device_index, self.update_gui_progress, self.check_cancel)
+                engine.prepare(job["model_size"], compute, device_index,
+                               translate=bool(job["also_english"] or job["translate_to"]),
+                               speaker_labels=job["speaker_labels"], progress_callback=self.update_gui_progress,
+                               cancel_check=self.check_cancel)
             except engine.ProcessCancelled:
                 cancelled = True
                 return
@@ -602,13 +693,8 @@ class App:
                 file_started = time.monotonic()
                 try:
                     result = engine.process_file(
-                        media_path=media, output_file=output_path_for(media, save_val, fmt, total_files),
-                        model_size=model_sz, source_language=lang_code, task=task_type,
-                        compute_device=compute, device_index=device_index, vad_filter=vad,
-                        output_format=fmt, readable_lines=readable_lines, names_and_terms=names_and_terms,
-                        video_output=video_output, batch_size=batch_size,
-                        progress_callback=self.update_gui_progress, cancel_check=self.check_cancel
-                    )
+                        media, output_path_for(media, save_val, fmt, total_files), device_index=device_index,
+                        progress_callback=self.update_gui_progress, cancel_check=self.check_cancel, **job)
                 except engine.ProcessCancelled:
                     cancelled = True
                     break
@@ -626,6 +712,8 @@ class App:
                     language = languages.describe(result["language"], result["language_probability"])
                     detected.append((name, language))
                     details.append(language)
+                if result.get("extra_languages"):
+                    details.append("+ " + ", ".join(languages.name(code) for code in result["extra_languages"]))
                 if result["notes"]:
                     details.append("see notes")
                 self._post_item(i, "done", " \u00b7 ".join(details))

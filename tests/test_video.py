@@ -31,6 +31,16 @@ def brightest_pixel(path, at_seconds=1.5):
     return max(raw)
 
 
+def frame_colours(path, at_seconds=1.5):
+    """(top half, bottom half) -> (brightest, yellowest) where yellowest = max(min(R, G) - B)."""
+    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-ss", str(at_seconds), "-i", path, "-frames:v", "1",
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
+    width, height = 320, 240
+    pixels = [raw[i:i + 3] for i in range(0, len(raw), 3)]
+    halves = (pixels[:width * height // 2], pixels[width * height // 2:])
+    return [(max(max(p) for p in half), max(min(p[0], p[1]) - p[2] for p in half)) for half in halves]
+
+
 def subtitle_tracks(path):
     """[(format, language, on by default), ...] for each subtitle track."""
     streams = json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", path],
@@ -82,6 +92,19 @@ class ChoosingTheEncoderTests(unittest.TestCase):
         self.assertFalse(used_gpu)
         self.assertEqual(len(commands), 1)
         self.assertNotIn("h264_nvenc", commands[0])
+
+
+class StyleTests(unittest.TestCase):
+    def test_standard_look_adds_nothing(self):
+        self.assertEqual(video.burn_style_filter(None), "")
+        self.assertEqual(video.burn_style_filter({"size": "Medium", "colour": "White", "position": "Bottom"}), "")
+
+    def test_style_text(self):
+        self.assertEqual(video.burn_style_filter({"size": "Large", "colour": "Yellow", "position": "Top"}),
+                         "FontSize=22,PrimaryColour=&H0000FFFF,Alignment=6")
+
+    def test_unknown_values_are_ignored(self):
+        self.assertEqual(video.burn_style_filter({"size": "Huge", "colour": "Plaid"}), "")
 
 
 class WithoutFFmpegTests(unittest.TestCase):
@@ -136,6 +159,13 @@ class SubtitleTrackTests(FFmpegTestCase):
         self.assertTrue(output.endswith("home video_subtitled.mkv"))
         self.assertEqual(subtitle_tracks(output), [("subrip", "eng", 1)])
         self.assertEqual(video_stream_md5(output), video_stream_md5(film))
+
+    def test_several_languages_become_several_tracks(self):
+        film = os.path.join(self.movies, "film.mkv")
+        make_video(film)
+        english = write_subtitles(os.path.join(self.folder, "Subs, out [B]", "film_subtitle.en.srt"))
+        output = video.add_subtitle_tracks(film, [(self.subs, "ja"), (english, "en")])
+        self.assertEqual(subtitle_tracks(output), [("subrip", "jpn", 1), ("subrip", "eng", 0)])
 
     def test_vtt_subtitles(self):
         film = os.path.join(self.movies, "clip.mov")
@@ -206,6 +236,16 @@ class BurnTests(FFmpegTestCase):
         self.assertLess(brightest_pixel(film), 40)
         self.assertGreater(brightest_pixel(output), 150, "subtitle text should be drawn on the frame")
         self.assertFalse(any("partial" in name for name in os.listdir(os.path.dirname(self.subs))))
+
+    def test_style_size_colour_and_position(self):
+        film = os.path.join(self.folder, "clip.mp4")
+        make_video(film)
+        standard, _ = video.burn_subtitles(film, self.subs)
+        (top_bright, _), (bottom_bright, bottom_yellow) = frame_colours(standard)
+        self.assertTrue(top_bright < 40 and bottom_bright > 150 and bottom_yellow < 40, "white text at the bottom")
+        styled, _ = video.burn_subtitles(film, self.subs, style={"size": "Large", "colour": "Yellow", "position": "Top"})
+        (top_bright, top_yellow), (bottom_bright, _) = frame_colours(styled)
+        self.assertTrue(top_yellow > 150 and bottom_bright < 40, "yellow text at the top")
 
     def test_vtt(self):
         film = os.path.join(self.folder, "clip.mp4")

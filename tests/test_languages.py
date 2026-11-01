@@ -15,6 +15,11 @@ class LanguageTests(unittest.TestCase):
             self.assertTrue(len(label) == 3 and label.isalpha() and label != "und", code)
         self.assertEqual((languages.iso639_2("ja"), languages.iso639_2("xx")), ("jpn", "und"))
 
+    def test_translation_codes(self):
+        missing = sorted(c for c in _LANGUAGE_CODES if languages.nllb_code(c) is None)
+        self.assertEqual(missing, ["br", "haw", "la"])  # NLLB-200 has no Breton, Hawaiian or Latin
+        self.assertEqual((languages.nllb_code("bn"), languages.nllb_code("zh")), ("ben_Beng", "zho_Hans"))
+
     def test_describe(self):
         self.assertEqual(languages.describe("ja", 0.966), "Japanese (97%)")
         self.assertEqual(languages.describe("xx", 0.5), "xx (50%)")

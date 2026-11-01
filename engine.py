@@ -44,15 +44,24 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 import av
 import huggingface_hub
+from types import SimpleNamespace
 from faster_whisper import BatchedInferencePipeline, WhisperModel
 from huggingface_hub.utils import tqdm as HfProgressBar
 
 import languages
+import speakers
+import translation
 import video
 import writers
+from cancellable import run_cancellable as _run_cancellable
 from errors import ProcessCancelled, ProcessingError  # GUI.py catches ProcessCancelled as engine.ProcessCancelled
 
 warnings.filterwarnings("ignore")
+
+SUPPORTED_MEDIA = (
+    '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm',
+    '.mp3', '.wav', '.aac', '.m4a', '.flac', '.ogg', '.wma'
+)
 
 # Hugging Face repositories for the models in the AI Model menu
 MODEL_REPOS = {
@@ -68,32 +77,8 @@ MODEL_REPOS = {
 MODEL_FILES = ["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"]
 
 _loaded = {"key": None, "model": None}
+_translator = {"key": None, "model": None}
 _load_lock = threading.Lock()
-
-
-def _run_cancellable(work, cancel_check):
-    """Runs work() on a helper thread so Cancel doesn't have to wait for it to finish.
-
-    On Cancel this raises ProcessCancelled straight away. work() carries on in the background and its
-    result is dropped (except a model that finishes loading, which is kept for next time).
-    """
-    outcome = {}
-
-    def run():
-        try:
-            outcome["result"] = work()
-        except BaseException as e:  # handed back to the caller below
-            outcome["error"] = e
-
-    helper = threading.Thread(target=run, daemon=True)
-    helper.start()
-    while helper.is_alive():
-        helper.join(0.2)
-        if cancel_check and cancel_check() and helper.is_alive():
-            raise ProcessCancelled()
-    if "error" in outcome:
-        raise outcome["error"]
-    return outcome["result"]
 
 
 def _size(n):
@@ -114,15 +99,15 @@ def _download_progress_bar(on_bytes):
     return DownloadProgress
 
 
-def model_folder(model_size, progress_callback=None, cancel_check=None):
+def download_model(repo_id, files, what, progress_callback=None, cancel_check=None):
     """The local folder holding a model's files, downloading them from Hugging Face first if needed.
 
+    files are filename patterns; what names the model in messages ("the 'large-v3' AI model").
     Downloads report progress (stage "download") and stop on Cancel; an interrupted download
     carries on from where it stopped next time.
     """
-    repo_id = MODEL_REPOS.get(model_size, model_size)
     try:
-        folder = huggingface_hub.snapshot_download(repo_id, allow_patterns=MODEL_FILES, local_files_only=True)
+        folder = huggingface_hub.snapshot_download(repo_id, allow_patterns=files, local_files_only=True)
         if os.path.exists(os.path.join(folder, "model.bin")):
             return folder  # already downloaded
     except Exception:  # not downloaded yet, or only partly
@@ -131,11 +116,11 @@ def model_folder(model_size, progress_callback=None, cancel_check=None):
     try:
         info = huggingface_hub.HfApi().model_info(repo_id, files_metadata=True)
     except Exception as e:
-        raise ProcessingError(f"Couldn't download the '{model_size}' AI model. Each model downloads once, the "
-                              f"first time you use it, so this needs an internet connection. ({e})") from e
-    files = [(f.rfilename, f.size or 0) for f in info.siblings
-             if any(fnmatch.fnmatch(f.rfilename, pattern) for pattern in MODEL_FILES)]
-    total = sum(size for _, size in files) or 1
+        raise ProcessingError(f"Couldn't download {what}. Each model downloads once, the first time you use "
+                              f"it, so this needs an internet connection. ({e})") from e
+    wanted = [(f.rfilename, f.size or 0) for f in info.siblings
+              if any(fnmatch.fnmatch(f.rfilename, pattern) for pattern in files)]
+    total = sum(size for _, size in wanted) or 1
     done = 0
 
     def on_bytes(n):
@@ -144,21 +129,27 @@ def model_folder(model_size, progress_callback=None, cancel_check=None):
         if cancel_check and cancel_check():
             raise ProcessCancelled()
         if progress_callback:
-            progress_callback(min(done, total), total, f"Downloading the '{model_size}' AI model (first use only)... "
+            progress_callback(min(done, total), total, f"Downloading {what} (first use only)... "
                                                        f"{_size(min(done, total))} of {_size(total)}", "download")
 
     path = None
-    for filename, size in files:
+    for filename, size in wanted:
         before = done
         try:
             path = huggingface_hub.hf_hub_download(repo_id, filename, tqdm_class=_download_progress_bar(on_bytes))
         except ProcessCancelled:
             raise
         except Exception as e:
-            raise ProcessingError(f"Downloading the '{model_size}' AI model failed ({e}). Try again: it carries "
-                                  "on from where it stopped.") from e
+            raise ProcessingError(f"Downloading {what} failed ({e}). Try again: it carries on from where it "
+                                  "stopped.") from e
         done = before + size
     return os.path.dirname(path)
+
+
+def model_folder(model_size, progress_callback=None, cancel_check=None):
+    """The local folder holding a Whisper model's files, downloading them first if needed."""
+    return download_model(MODEL_REPOS.get(model_size, model_size), MODEL_FILES, f"the '{model_size}' AI model",
+                          progress_callback, cancel_check)
 
 
 def get_model(model_size, compute_device="auto", device_index=0, progress_callback=None, cancel_check=None):
@@ -190,6 +181,41 @@ def _load(key, folder):
         _loaded["key"] = key
         _loaded["model"] = model
         return model
+
+
+def get_translator(compute_device="auto", device_index=0, progress_callback=None, cancel_check=None):
+    """The NLLB-200 translation model, downloaded on first use and loaded once."""
+    key = (compute_device, device_index)
+    if _translator["key"] == key:
+        return _translator["model"]
+    folder = download_model(translation.REPO, translation.FILES, "the translation model", progress_callback,
+                            cancel_check)
+    if progress_callback:
+        progress_callback(0, 100, "Loading the translation model...", "load")
+
+    def load():
+        with _load_lock:
+            if _translator["key"] != key:
+                _translator["model"] = translation.Translator(folder, compute_device, device_index)
+                _translator["key"] = key
+            return _translator["model"]
+    return _run_cancellable(load, cancel_check)
+
+
+def prepare(model_size, compute_device="auto", device_index=0, translate=False, speaker_labels=False,
+            progress_callback=None, cancel_check=None):
+    """Downloads and loads everything a queue needs before its first file, so problems show up once."""
+    get_model(model_size, compute_device, device_index, progress_callback, cancel_check)
+    if translate:
+        get_translator(compute_device, device_index, progress_callback, cancel_check)
+    if speaker_labels:
+        speakers.get_pipeline(compute_device != "cpu", progress_callback, cancel_check)
+
+
+def extra_output_path(path, language):
+    """'film_subtitle.srt', 'en' -> 'film_subtitle.en.srt'"""
+    base, ext = os.path.splitext(path)
+    return f"{base}.{language}{ext}"
 
 
 def media_duration(path):
@@ -285,42 +311,97 @@ def _transcribe_once(media_path, model, source_language, task, vad_filter, names
 def process_file(media_path, output_file, model_size="large-v3", source_language="auto", task="translate",
                  compute_device="auto", device_index=0, vad_filter=True, output_format=".srt",
                  readable_lines=True, names_and_terms="", video_output="none", batch_size=0,
-                 progress_callback=None, cancel_check=None):
+                 also_english=False, translate_to=None, speaker_labels=False, num_speakers=None,
+                 burn_style=None, review=None, progress_callback=None, cancel_check=None):
     """Makes subtitles for one media file and, if asked, adds them to a copy of the video.
 
-    video_output: "none", "track" (a subtitle track viewers can switch on and off) or "burn" (drawn
-    into the picture). batch_size > 1 turns on Fast Mode (see transcribe).
+    task: "translate" (English subtitles) or "transcribe" (the spoken language).
+    also_english: also save an English translation next to it (<name>.en.srt).
+    translate_to: also save a translation into this language, e.g. "fr" (<name>.fr.srt).
+    speaker_labels: start a subtitle with "Speaker 1:" etc. whenever the speaker changes.
+    video_output: "none", "track" (every language as a subtitle track viewers can switch on and off)
+    or "burn" (the main subtitles drawn into the picture, styled by burn_style).
+    batch_size > 1 turns on Fast Mode (see transcribe).
+    review(texts) is called with {path: text} before anything is saved and returns the texts to
+    save (edited or not), or None to cancel.
 
-    Returns {"subtitle_file", "video_file", "notes", "language", "language_probability",
-    "language_detected"}. Raises ProcessCancelled if the user cancels, and ProcessingError
-    (or faster-whisper's own errors) if something goes wrong.
+    Returns {"subtitle_file", "extra_files", "extra_languages", "video_file", "notes", "language", "language_probability",
+    "language_detected"}. Raises ProcessCancelled if the user cancels, and ProcessingError (or
+    faster-whisper's own errors) if something goes wrong.
     """
     if video_output not in ("none", "track", "burn"):
         raise ValueError(f"Unknown video output: {video_output}")
     model = get_model(model_size, compute_device, device_index, progress_callback, cancel_check)
     segments, info = transcribe(media_path, model, source_language, task, vad_filter, names_and_terms,
                                 batch_size, progress_callback, cancel_check)
+    # Translations come out in English; otherwise the subtitles are in the spoken language
+    language = "en" if task == "translate" else info.language
+    notes = []
+    if source_language == "auto" and info.language_probability < 0.5:
+        notes.append(f"Not sure which language this is (best guess "
+                     f"{languages.describe(info.language, info.language_probability)}). "
+                     "If the subtitles look wrong, choose the Source Language yourself.")
+
+    if speaker_labels:
+        try:
+            turns = speakers.find_speakers(media_path, compute_device != "cpu", num_speakers, progress_callback,
+                                           cancel_check)
+            segments = speakers.assign(segments, turns)
+        except ProcessingError as e:
+            notes.append(f"No speaker labels: {e}")
+
+    # The main subtitles, then any translations of them
+    outputs = [(output_file, language, segments)]
+    for target in (["en"] if also_english else []) + ([translate_to] if translate_to else []):
+        if any(target == existing for _, existing, _ in outputs):
+            if target == "en" and also_english and language == "en":
+                notes.append("It's already in English, so there's no separate English file.")
+            continue
+        try:
+            translator = get_translator(compute_device, device_index, progress_callback, cancel_check)
+            name = languages.name(target)
+
+            def translate_progress(done, total, name=name):
+                if progress_callback:
+                    progress_callback(done, total, f"Translating subtitles into {name}... "
+                                                   f"{round(done / total * 100)}%", "translate")
+            texts = translator.translate([segment.text for segment in segments], language, target, cancel_check,
+                                         translate_progress)
+        except ProcessingError as e:
+            notes.append(f"No {languages.name(target)} subtitles: {e}")
+            continue
+        translated = [SimpleNamespace(start=segment.start, end=segment.end, text=text, words=None,
+                                      speaker=getattr(segment, "speaker", None))
+                      for segment, text in zip(segments, texts)]
+        outputs.append((extra_output_path(output_file, target), target, translated))
+
+    texts = {}
+    for path, lang, lines in outputs:
+        if speaker_labels:
+            lines = speakers.with_labels(lines)
+        texts[path] = writers.render(lines, output_format, readable_lines, languages.line_length(lang))
+    if review:
+        texts = review(texts)
+        if texts is None:
+            raise ProcessCancelled()
 
     if progress_callback: progress_callback(100, 100, "Saving text file...", "save")
-    # Translations come out in English; otherwise the subtitles are in the spoken language
-    subtitle_language = "en" if task == "translate" else info.language
-    writers.write(output_file, segments, output_format, readable_lines, languages.line_length(subtitle_language))
-    result = {"subtitle_file": output_file, "video_file": None, "notes": [],
-              "language": info.language, "language_probability": info.language_probability,
+    for path, text in texts.items():
+        writers.save_text(path, text)
+    result = {"subtitle_file": output_file, "extra_files": [path for path, _, _ in outputs[1:]],
+              "extra_languages": [lang for _, lang, _ in outputs[1:]], "video_file": None,
+              "notes": notes, "language": info.language, "language_probability": info.language_probability,
               "language_detected": source_language == "auto"}
-    if result["language_detected"] and info.language_probability < 0.5:
-        result["notes"].append(f"Not sure which language this is (best guess {languages.describe(info.language, info.language_probability)}). "
-                               "If the subtitles look wrong, choose the Source Language yourself.")
 
     if video_output != "none":
         if output_format not in (".srt", ".vtt"):
-            result["notes"].append("Video skipped: .txt files have no timings to add to a video.")
+            notes.append("Video skipped: .txt files have no timings to add to a video.")
         elif not video.is_supported_video(media_path):
-            result["notes"].append("Video skipped: only MP4, MKV, AVI and MOV videos are supported.")
+            notes.append("Video skipped: only MP4, MKV, AVI and MOV videos are supported.")
         elif video_output == "track":
             if progress_callback: progress_callback(0, 100, "Adding the subtitle track to the video...", "video")
-            result["video_file"] = video.add_subtitle_track(media_path, output_file, subtitle_language,
-                                                            cancel_check=cancel_check)
+            result["video_file"] = video.add_subtitle_tracks(media_path, [(path, lang) for path, lang, _ in outputs],
+                                                             cancel_check=cancel_check)
         else:
             if progress_callback: progress_callback(0, 100, "Burning subtitles to video... 0%", "video")
 
@@ -330,10 +411,10 @@ def process_file(media_path, output_file, model_size="large-v3", source_language
                     progress_callback(min(seconds, info.duration), info.duration,
                                       f"Burning subtitles to video... {percentage}%", "video")
             result["video_file"], used_gpu = video.burn_subtitles(media_path, output_file, cancel_check=cancel_check,
-                                                                  on_progress=burn_progress)
+                                                                  on_progress=burn_progress, style=burn_style)
             if not used_gpu:
-                result["notes"].append("Burned in with the CPU encoder, because FFmpeg couldn't use the NVIDIA "
-                                       "encoder (NVENC). It works, just more slowly.")
+                notes.append("Burned in with the CPU encoder, because FFmpeg couldn't use the NVIDIA "
+                             "encoder (NVENC). It works, just more slowly.")
 
     if progress_callback: progress_callback(100, 100, "Success! File saved.", "done")
     return result
