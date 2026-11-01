@@ -1,0 +1,23 @@
+import unittest
+
+from faster_whisper.tokenizer import _LANGUAGE_CODES
+
+import languages
+
+
+class LanguageTests(unittest.TestCase):
+    def test_every_whisper_language_has_a_name(self):
+        self.assertEqual(sorted(c for c in _LANGUAGE_CODES if c not in languages.NAMES), [])
+
+    def test_describe(self):
+        self.assertEqual(languages.describe("ja", 0.966), "Japanese (97%)")
+        self.assertEqual(languages.describe("xx", 0.5), "xx (50%)")
+
+    def test_line_lengths(self):
+        self.assertEqual(languages.line_length("en"), 42)
+        self.assertEqual(languages.line_length("ja"), 13)
+        self.assertEqual(languages.line_length("zh"), 16)
+
+
+if __name__ == "__main__":
+    unittest.main()

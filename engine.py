@@ -38,6 +38,7 @@ if hasattr(os, 'add_dll_directory'):
 from faster_whisper import WhisperModel
 
 import burn
+import languages
 import writers
 from errors import ProcessCancelled  # GUI.py catches this as engine.ProcessCancelled
 
@@ -73,8 +74,8 @@ def get_model(model_size, compute_device="auto", device_index=0, progress_callba
 
 
 def transcribe(media_path, model, source_language="auto", task="translate", vad_filter=True,
-               word_timestamps=False, progress_callback=None, cancel_check=None):
-    """Runs the model over one file and returns its segments.
+               names_and_terms="", progress_callback=None, cancel_check=None):
+    """Runs the model over one file. Returns (segments, info); info.language is the spoken language.
 
     Raises ProcessCancelled if cancel_check() becomes true part-way through.
     """
@@ -92,13 +93,19 @@ def transcribe(media_path, model, source_language="auto", task="translate", vad_
         beam_size=10,
         best_of=5,
         temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-        initial_prompt="Clear, formal dialogue, high-definition audio transcription.",
+        # Names & terms to spell correctly; faster-whisper adds them to every 30-second window
+        hotwords=(names_and_terms or "").strip() or None,
+        # Stop repeated lines on long films: don't feed each window the previous window's text
+        # (so one mistake can't loop), and skip long silences where Whisper tends to invent text
+        condition_on_previous_text=False,
+        hallucination_silence_threshold=2.0,
         vad_filter=vad_filter,
         vad_parameters=vad_params,
-        word_timestamps=word_timestamps
+        word_timestamps=True  # needed by hallucination_silence_threshold and readable line splitting
     )
     total_duration = round(info.duration, 2)
-    action_text = "Translating" if task == "translate" else "Transcribing"
+    spoken = languages.name(info.language)
+    action_text = f"Translating from {spoken}" if task == "translate" else f"Transcribing {spoken}"
 
     results = []
     for segment in segments:  # faster-whisper does the work as we loop
@@ -110,24 +117,33 @@ def transcribe(media_path, model, source_language="auto", task="translate", vad_
         if progress_callback:
             percentage = min(100.0, round((segment.end / total_duration) * 100, 1))
             progress_callback(segment.end, total_duration, f"{action_text}... {percentage}%")
-    return results
+    return results, info
 
 
 def process_file(media_path, output_file, model_size="large-v3", source_language="auto", task="translate",
                  compute_device="auto", device_index=0, vad_filter=True, output_format=".srt",
-                 word_timestamps=False, hardcode_subtitles=False, progress_callback=None, cancel_check=None):
+                 readable_lines=True, names_and_terms="", hardcode_subtitles=False,
+                 progress_callback=None, cancel_check=None):
     """Makes subtitles for one media file and, if asked, burns them into a copy of the video.
 
-    Returns {"subtitle_file", "video_file", "notes"}. Raises ProcessCancelled if the user cancels,
-    and ProcessingError (or faster-whisper's own errors) if something goes wrong.
+    Returns {"subtitle_file", "video_file", "notes", "language", "language_probability",
+    "language_detected"}. Raises ProcessCancelled if the user cancels, and ProcessingError
+    (or faster-whisper's own errors) if something goes wrong.
     """
     model = get_model(model_size, compute_device, device_index, progress_callback)
-    segments = transcribe(media_path, model, source_language, task, vad_filter, word_timestamps,
-                          progress_callback, cancel_check)
+    segments, info = transcribe(media_path, model, source_language, task, vad_filter, names_and_terms,
+                                progress_callback, cancel_check)
 
     if progress_callback: progress_callback(100, 100, "Saving text file...")
-    writers.write(output_file, segments, output_format, word_timestamps)
-    result = {"subtitle_file": output_file, "video_file": None, "notes": []}
+    # Translations come out in English; otherwise the subtitles are in the spoken language
+    subtitle_language = "en" if task == "translate" else info.language
+    writers.write(output_file, segments, output_format, readable_lines, languages.line_length(subtitle_language))
+    result = {"subtitle_file": output_file, "video_file": None, "notes": [],
+              "language": info.language, "language_probability": info.language_probability,
+              "language_detected": source_language == "auto"}
+    if result["language_detected"] and info.language_probability < 0.5:
+        result["notes"].append(f"Not sure which language this is (best guess {languages.describe(info.language, info.language_probability)}). "
+                               "If the subtitles look wrong, choose the Source Language yourself.")
 
     if hardcode_subtitles:
         if output_format not in (".srt", ".vtt"):

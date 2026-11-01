@@ -19,6 +19,7 @@ from tkinterdnd2 import TkinterDnD, DND_FILES
 import burn
 import engine
 import hardware
+import languages
 
 # --- Configuration & Constants ---
 LANGUAGES = [
@@ -116,7 +117,7 @@ class App:
             self.root.iconbitmap(resource_path("SubtitleSmith.ico"))
         except Exception:
             pass  # a missing icon shouldn't stop the app (and Linux can't use .ico files)
-        self.root.geometry("780x580")
+        self.root.geometry("780x620")
         self.root.resizable(False, False)
         self.root.attributes('-alpha', 1.0)
         try:
@@ -135,7 +136,7 @@ class App:
         self.vad_var = ctk.BooleanVar(value=True)
         self.theme_var = ctk.BooleanVar(value=False)
         self.hardcode_var = ctk.BooleanVar(value=False)
-        self.word_timestamps_var = ctk.BooleanVar(value=False)
+        self.readable_lines_var = ctk.BooleanVar(value=True)
         self.status_var = ctk.StringVar(value="Ready")
 
         self.format_var.trace_add("write", self.update_extension_in_path)
@@ -173,17 +174,26 @@ class App:
         ctk.CTkLabel(options_frame, text="AI Model:").pack(side="left", padx=(0, 5))
         ctk.CTkOptionMenu(options_frame, variable=self.model_var, values=MODELS, width=270).pack(side="left")
 
-        # 3. Action Toggle
+        # 3. Names & Terms (optional spelling hints for the AI)
+        names_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        names_frame.grid(row=3, column=0, columnspan=4, pady=(0, 0))
+        ctk.CTkLabel(names_frame, text="Names & Terms:").pack(side="left", padx=(0, 5))
+        self.names_entry = ctk.CTkEntry(
+            names_frame, width=523,
+            placeholder_text="Optional: names or words to spell correctly, e.g. Frodo, Gandalf, Mordor")
+        self.names_entry.pack(side="left")
+
+        # 4. Action Toggle
         action_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        action_frame.grid(row=3, column=0, columnspan=4, pady=10)
+        action_frame.grid(row=4, column=0, columnspan=4, pady=10)
         ctk.CTkLabel(action_frame, text="Action:").pack(side="left", padx=10)
         ctk.CTkSegmentedButton(action_frame, variable=self.task_var,
                                values=["Translate to English", "Keep Original Language"],
                                command=self.on_task_change, width=320).pack(side="left", padx=10)
 
-        # 4. Advanced Settings Row 1
+        # 5. Advanced Settings Row 1
         adv_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        adv_frame.grid(row=4, column=0, columnspan=4, pady=(5, 0))
+        adv_frame.grid(row=5, column=0, columnspan=4, pady=(5, 0))
         ctk.CTkLabel(adv_frame, text="Format:").pack(side="left", padx=(0, 5))
         ctk.CTkOptionMenu(adv_frame, variable=self.format_var, values=FORMATS, width=70).pack(side="left",
                                                                                              padx=(0, 15))
@@ -192,26 +202,26 @@ class App:
                                                                                                        padx=(0, 15))
         ctk.CTkSwitch(adv_frame, text="VAD Filter", variable=self.vad_var).pack(side="left", padx=(0, 15))
 
-        # 5. Advanced Settings Row 2
+        # 6. Advanced Settings Row 2
         adv2_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        adv2_frame.grid(row=5, column=0, columnspan=4, pady=(5, 5))
+        adv2_frame.grid(row=6, column=0, columnspan=4, pady=(5, 5))
         ctk.CTkSwitch(adv2_frame, text="Burn Subtitles to Video", variable=self.hardcode_var).pack(side="left",
                                                                                                   padx=(0, 20))
-        ctk.CTkSwitch(adv2_frame, text="Word Timestamps", variable=self.word_timestamps_var).pack(side="left",
-                                                                                                 padx=(0, 20))
+        ctk.CTkSwitch(adv2_frame, text="Readable Lines", variable=self.readable_lines_var).pack(side="left",
+                                                                                              padx=(0, 20))
         ctk.CTkSwitch(adv2_frame, text="Light UI", variable=self.theme_var, command=self.toggle_theme).pack(side="left")
 
-        # 6. Status
+        # 7. Status
         status_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        status_frame.grid(row=6, column=0, columnspan=4, pady=(15, 0))
+        status_frame.grid(row=7, column=0, columnspan=4, pady=(15, 0))
         ctk.CTkLabel(status_frame, textvariable=self.status_var, text_color="gray").pack(pady=(0, 5))
         self.progress_bar = ctk.CTkProgressBar(status_frame, width=460)
         self.progress_bar.set(0)
         self.progress_bar.pack()
 
-        # 7. Buttons
+        # 8. Buttons
         button_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        button_frame.grid(row=7, column=0, columnspan=4, pady=(15, 10))
+        button_frame.grid(row=8, column=0, columnspan=4, pady=(15, 10))
         self.start_button = ctk.CTkButton(button_frame, text="Start Processing", command=self.start_process,
                                           fg_color="#28a745", hover_color="#218838")
         self.start_button.pack(side="left", padx=15)
@@ -219,9 +229,9 @@ class App:
                                            fg_color="#dc3545", hover_color="#c82333", state="disabled")
         self.cancel_button.pack(side="left", padx=15)
 
-        # 8. Hardware Info
+        # 9. Hardware Info
         hw_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        hw_frame.grid(row=8, column=0, columnspan=4, pady=(0, 10))
+        hw_frame.grid(row=9, column=0, columnspan=4, pady=(0, 10))
         self.hw_textbox = ctk.CTkTextbox(hw_frame, width=600, height=130, text_color="#28a745", fg_color="#1e1e1e")
         self.hw_textbox.pack()
 
@@ -376,15 +386,16 @@ class App:
         threading.Thread(
             target=self.run_queue,
             args=(self.selected_files.copy(), lang_code, self.save_path_var.get(), model_sz, task_code, compute_code,
-                  self.vad_var.get(), fmt, hardcode, self.word_timestamps_var.get()),
+                  self.vad_var.get(), fmt, hardcode, self.readable_lines_var.get(), self.names_entry.get().strip()),
             daemon=True
         ).start()
 
-    def run_queue(self, videos, lang_code, save_val, model_sz, task_type, compute, vad, fmt, hardcode, word_ts):
+    def run_queue(self, videos, lang_code, save_val, model_sz, task_type, compute, vad, fmt, hardcode,
+                  readable_lines, names_and_terms):
         """Worker thread: processes each file in turn, then shows a summary."""
         total_files = len(videos)
         device_index = 0 if compute == "cpu" else self.gpu_index
-        succeeded, failed, notes = [], [], []
+        succeeded, failed, notes, detected = [], [], [], []
         cancelled = False
         load_error = None
 
@@ -407,7 +418,8 @@ class App:
                         media_path=video, output_file=output_path_for(video, save_val, fmt, total_files),
                         model_size=model_sz, source_language=lang_code, task=task_type,
                         compute_device=compute, device_index=device_index, vad_filter=vad,
-                        output_format=fmt, word_timestamps=word_ts, hardcode_subtitles=hardcode,
+                        output_format=fmt, readable_lines=readable_lines, names_and_terms=names_and_terms,
+                        hardcode_subtitles=hardcode,
                         progress_callback=self.update_gui_progress, cancel_check=self.check_cancel
                     )
                 except engine.ProcessCancelled:
@@ -419,13 +431,16 @@ class App:
                     continue
                 succeeded.append(name)
                 notes += [f"{name}: {note}" for note in result["notes"]]
+                if result["language_detected"]:
+                    detected.append((name, languages.describe(result["language"], result["language_probability"])))
         finally:
             self.batch_prefix = ""
-            self.root.after(0, lambda: self.show_summary(total_files, succeeded, failed, notes, cancelled, load_error))
+            self.root.after(0, lambda: self.show_summary(total_files, succeeded, failed, notes, cancelled, load_error,
+                                                         detected))
             self.root.after(0, lambda: self.start_button.configure(state="normal"))
             self.root.after(0, lambda: self.cancel_button.configure(state="disabled"))
 
-    def show_summary(self, total, succeeded, failed, notes, cancelled, load_error):
+    def show_summary(self, total, succeeded, failed, notes, cancelled, load_error, detected=()):
         """Runs on the main thread once the queue finishes."""
         if load_error:
             self.status_var.set("Couldn't load the AI model.")
@@ -439,7 +454,10 @@ class App:
             self.status_var.set(f"Finished with errors: {len(succeeded)} of {total} file(s) succeeded, "
                                 f"{len(failed)} failed.")
         else:
-            self.status_var.set(f"Successfully processed {total} file(s).")
+            status = f"Successfully processed {total} file(s)."
+            if total == 1 and detected:
+                status += f" Detected language: {detected[0][1]}."
+            self.status_var.set(status)
             self.progress_bar.set(1.0)
 
         lines = [f"{len(succeeded)} of {total} file(s) processed."]
@@ -447,6 +465,10 @@ class App:
             lines += ["", f"Failed ({len(failed)}):"]
             lines += [f"• {name}: {error[:300]}" for name, error in failed[:10]]
             if len(failed) > 10: lines.append(f"...and {len(failed) - 10} more.")
+        if detected and total > 1:
+            lines += ["", "Detected languages:"]
+            lines += [f"\u2022 {name}: {language}" for name, language in detected[:10]]
+            if len(detected) > 10: lines.append(f"...and {len(detected) - 10} more.")
         if notes:
             lines += ["", "Notes:"]
             lines += [f"• {note}" for note in notes[:10]]

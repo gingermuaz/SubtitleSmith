@@ -13,6 +13,7 @@ SEGMENTS = [NS(start=0.5, end=2.5, text=" Hello there.", words=None),
 class FakeModel:
     """Stands in for faster_whisper.WhisperModel, so tests need no model download or GPU."""
     loads = []
+    language, probability = "fr", 0.97
 
     def __init__(self, name, device, device_index, compute_type):
         FakeModel.loads.append((name, device, device_index, compute_type))
@@ -20,13 +21,16 @@ class FakeModel:
 
     def transcribe(self, path, **kwargs):
         self.calls.append((path, kwargs))
-        return iter(SEGMENTS), NS(duration=6.0)
+        language = kwargs["language"] or FakeModel.language
+        probability = 1.0 if kwargs["language"] else FakeModel.probability
+        return iter(SEGMENTS), NS(duration=6.0, language=language, language_probability=probability)
 
 
 class EngineTests(unittest.TestCase):
     def setUp(self):
         engine._loaded.update(key=None, model=None)
         FakeModel.loads.clear()
+        FakeModel.language, FakeModel.probability = "fr", 0.97
         patcher = mock.patch.object(engine, "WhisperModel", FakeModel)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -39,6 +43,9 @@ class EngineTests(unittest.TestCase):
     def run_file(self, name="out.srt", **kwargs):
         output = os.path.join(self.folder, name)
         return engine.process_file(self.audio, output, output_format=os.path.splitext(name)[1], **kwargs), output
+
+    def last_call(self):
+        return engine._loaded["model"].calls[-1][1]
 
     # --- model loading ---
     def test_model_loaded_once_and_reused(self):
@@ -58,31 +65,65 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(FakeModel.loads[0], ("deepdml/faster-whisper-large-v3-turbo-ct2", "auto", 1, "int8_float16"))
         self.assertEqual(FakeModel.loads[1], ("tiny", "cpu", 0, "int8"))
 
-    # --- transcription ---
-    def test_writes_subtitles_and_returns_result(self):
-        result, output = self.run_file("out.srt")
-        self.assertEqual(result, {"subtitle_file": output, "video_file": None, "notes": []})
-        with open(output, encoding="utf-8") as f:
-            self.assertTrue(f.read().startswith("1\n00:00:00,500 --> 00:00:02,500\nHello there.\n\n2\n"))
-
+    # --- transcription settings ---
     def test_options_reach_faster_whisper(self):
         self.run_file(source_language="auto", task="transcribe", vad_filter=False)
-        path, kwargs = engine._loaded["model"].calls[0]
-        self.assertEqual(path, self.audio)
+        kwargs = self.last_call()
         self.assertIsNone(kwargs["language"])
         self.assertEqual(kwargs["task"], "transcribe")
         self.assertIsNone(kwargs["vad_parameters"])
         self.run_file(source_language="ja", vad_filter=True)
-        kwargs = engine._loaded["model"].calls[1][1]
+        kwargs = self.last_call()
         self.assertEqual(kwargs["language"], "ja")
         self.assertEqual(kwargs["vad_parameters"], {"min_silence_duration_ms": 500, "speech_pad_ms": 400})
+
+    def test_no_hard_coded_prompt(self):
+        self.run_file()
+        self.assertNotIn("initial_prompt", self.last_call())
+        self.assertIsNone(self.last_call()["hotwords"])
+
+    def test_names_and_terms_become_hotwords(self):
+        self.run_file(names_and_terms="  Frodo, Gandalf, Mordor ")
+        self.assertEqual(self.last_call()["hotwords"], "Frodo, Gandalf, Mordor")
+
+    def test_settings_against_repeated_lines(self):
+        self.run_file(readable_lines=False)
+        kwargs = self.last_call()
+        self.assertIs(kwargs["condition_on_previous_text"], False)
+        self.assertEqual(kwargs["hallucination_silence_threshold"], 2.0)
+        self.assertIs(kwargs["word_timestamps"], True)  # the silence check needs word timings
+
+    # --- results ---
+    def test_writes_subtitles_and_returns_result(self):
+        result, output = self.run_file("out.srt")
+        self.assertEqual(result, {"subtitle_file": output, "video_file": None, "notes": [],
+                                  "language": "fr", "language_probability": 0.97, "language_detected": True})
+        with open(output, encoding="utf-8") as f:
+            self.assertTrue(f.read().startswith("1\n00:00:00,500 --> 00:00:02,500\nHello there.\n\n2\n"))
+
+    def test_language_chosen_by_user_is_not_reported_as_detected(self):
+        result, _ = self.run_file(source_language="ja")
+        self.assertEqual((result["language"], result["language_detected"]), ("ja", False))
+
+    def test_unsure_detection_adds_a_note(self):
+        FakeModel.probability = 0.31
+        result, _ = self.run_file()
+        self.assertIn("Not sure which language this is (best guess French (31%))", result["notes"][0])
+
+    def test_line_length_follows_the_subtitle_language(self):
+        FakeModel.language = "ja"
+        with mock.patch.object(engine.writers, "write") as write:
+            self.run_file(task="transcribe")  # Japanese subtitles
+            self.run_file(task="translate")  # English subtitles
+            self.run_file(task="transcribe", readable_lines=False)
+        self.assertEqual([c.args[3:] for c in write.call_args_list], [(True, 13), (True, 42), (False, 13)])
 
     def test_progress_messages(self):
         messages = []
         self.run_file(task="translate", progress_callback=lambda cur, total, text: messages.append(text))
         self.assertEqual(messages, ["Loading 'large-v3' model onto AUTO...", "Extracting audio and analyzing...",
-                                    "Translating... 41.7%", "Translating... 100.0%", "Saving text file...",
-                                    "Success! File saved."])
+                                    "Translating from French... 41.7%", "Translating from French... 100.0%",
+                                    "Saving text file...", "Success! File saved."])
 
     def test_cancel_raises_and_writes_nothing(self):
         with self.assertRaises(engine.ProcessCancelled):
