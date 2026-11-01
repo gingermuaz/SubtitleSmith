@@ -39,7 +39,7 @@ Featuring drag-and-drop file support and an intelligent hardware scanner that au
 
 4. **Install dependencies:**
    ```bash
-   python -m pip install faster-whisper ctranslate2 customtkinter nvidia-cublas-cu12 nvidia-cudnn-cu12 psutil tkinterdnd2 tqdm
+   python -m pip install faster-whisper ctranslate2 customtkinter nvidia-cublas-cu12 nvidia-cudnn-cu12 psutil tkinterdnd2
 
 5. **Run the Application:**
    ```bash

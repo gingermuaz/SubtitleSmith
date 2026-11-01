@@ -1,6 +1,6 @@
 # PyInstaller Folders
 build/
 dist/
-*.spec
 __pycache__/
 .idea/
+.venv/

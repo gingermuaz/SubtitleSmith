@@ -1,6 +1,7 @@
 import os
 import sys
 import gc
+import importlib.util
 import subprocess
 import shutil
 import tempfile
@@ -9,25 +10,33 @@ import tempfile
 # the model loads onto. Must be set before CUDA starts up.
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
+
+# --- WINDOWS CUDA DLLs ---
+# CTranslate2 needs cuBLAS and cuDNN from the nvidia-cublas-cu12 / nvidia-cudnn-cu12 pip packages.
+# Their DLLs live in nvidia/<lib>/bin: under site-packages when running from source, and inside the
+# bundle folder (sys._MEIPASS) in the packaged .exe, where SubtitleSmith.spec puts them.
+def _cuda_dll_folders():
+    if getattr(sys, "frozen", False):
+        nvidia_roots = [os.path.join(sys._MEIPASS, "nvidia")]
+    else:
+        spec = importlib.util.find_spec("nvidia")
+        nvidia_roots = list(spec.submodule_search_locations or []) if spec else []
+    folders = [os.path.join(root, lib, "bin") for root in nvidia_roots for lib in ("cublas", "cudnn")]
+    return [folder for folder in folders if os.path.isdir(folder)]
+
+
+_dll_folders = _cuda_dll_folders()
+os.environ["PATH"] = os.pathsep.join(_dll_folders + [os.environ.get("PATH", "")])
+if hasattr(os, 'add_dll_directory'):
+    for _folder in _dll_folders:
+        os.add_dll_directory(_folder)
+# ----------------------------------------
+
 from faster_whisper import WhisperModel
-from tqdm import tqdm
 import warnings
 
 warnings.filterwarnings("ignore")
 
-# --- AGGRESSIVE WINDOWS DLL INJECTION ---
-venv_dir = os.path.dirname(os.path.dirname(sys.executable))
-site_packages_dir = os.path.join(venv_dir, "Lib", "site-packages")
-cublas_bin = os.path.join(site_packages_dir, "nvidia", "cublas", "bin")
-cudnn_bin = os.path.join(site_packages_dir, "nvidia", "cudnn", "bin")
-
-os.environ["PATH"] = f"{cublas_bin};{cudnn_bin};" + os.environ.get("PATH", "")
-if hasattr(os, 'add_dll_directory'):
-    if os.path.exists(cublas_bin): os.add_dll_directory(cublas_bin)
-    if os.path.exists(cudnn_bin): os.add_dll_directory(cudnn_bin)
-
-
-# ----------------------------------------
 
 def format_timestamp(seconds: float, is_vtt=False):
     """Formats time to SRT (00:00:00,000) or VTT (00:00:00.000) standards."""
@@ -156,41 +165,37 @@ def translate_movie(video_path, source_language, output_file, model_size="large-
 
     subtitle_index = 1
 
-    with tqdm(total=total_duration, unit="sec",
-              bar_format="{l_bar}{bar}| {n:.1f}/{total:.1f} [{elapsed}<{remaining}]") as pbar:
-        for segment in segments:
-            if cancel_check and cancel_check():
-                if progress_callback: progress_callback(0, 100, "Process Canceled.")
-                raise ProcessCancelled()
+    for segment in segments:
+        if cancel_check and cancel_check():
+            if progress_callback: progress_callback(0, 100, "Process Canceled.")
+            raise ProcessCancelled()
 
-            if output_format in [".srt", ".vtt"]:
-                if word_timestamps and segment.words:
-                    # Output individual words as their own subtitle block
-                    for word in segment.words:
-                        start_time = format_timestamp(word.start, is_vtt)
-                        end_time = format_timestamp(word.end, is_vtt)
-                        content += f"{subtitle_index}\n"
-                        content += f"{start_time} --> {end_time}\n"
-                        content += f"{word.word.strip()}\n\n"
-                        subtitle_index += 1
-                else:
-                    # Standard sentence-level subtitle block
-                    start_time = format_timestamp(segment.start, is_vtt)
-                    end_time = format_timestamp(segment.end, is_vtt)
+        if output_format in [".srt", ".vtt"]:
+            if word_timestamps and segment.words:
+                # Output individual words as their own subtitle block
+                for word in segment.words:
+                    start_time = format_timestamp(word.start, is_vtt)
+                    end_time = format_timestamp(word.end, is_vtt)
                     content += f"{subtitle_index}\n"
                     content += f"{start_time} --> {end_time}\n"
-                    content += f"{segment.text.strip()}\n\n"
+                    content += f"{word.word.strip()}\n\n"
                     subtitle_index += 1
-            elif output_format == ".txt":
-                # Standard text ignores timestamps completely
-                content += f"{segment.text.strip()}\n"
+            else:
+                # Standard sentence-level subtitle block
+                start_time = format_timestamp(segment.start, is_vtt)
+                end_time = format_timestamp(segment.end, is_vtt)
+                content += f"{subtitle_index}\n"
+                content += f"{start_time} --> {end_time}\n"
+                content += f"{segment.text.strip()}\n\n"
+                subtitle_index += 1
+        elif output_format == ".txt":
+            # Standard text ignores timestamps completely
+            content += f"{segment.text.strip()}\n"
 
-            pbar.update(segment.end - pbar.n)
-
-            if progress_callback:
-                percentage = min(100.0, round((segment.end / total_duration) * 100, 1))
-                action_text = "Translating" if task == "translate" else "Transcribing"
-                progress_callback(segment.end, total_duration, f"{action_text}... {percentage}%")
+        if progress_callback:
+            percentage = min(100.0, round((segment.end / total_duration) * 100, 1))
+            action_text = "Translating" if task == "translate" else "Transcribing"
+            progress_callback(segment.end, total_duration, f"{action_text}... {percentage}%")
 
     if progress_callback: progress_callback(100, 100, "Saving text file...")
 

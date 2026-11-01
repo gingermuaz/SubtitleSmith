@@ -1,9 +1,18 @@
 import os
+import sys
 import shutil
 import threading
 import ctypes
 import platform
 from tkinter import filedialog, messagebox
+
+# The packaged .exe has no console (console=False), so sys.stdout/sys.stderr are None and any
+# library that prints would crash, e.g. the tqdm progress bars in Hugging Face model downloads.
+# Send that output nowhere instead.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 import customtkinter as ctk
 from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -50,6 +59,12 @@ batch_prefix = ""
 # Filled in by the hardware scan at startup; these defaults are used if the scan fails
 recommended_models = {"transcribe": "large-v3-turbo", "translate": "large-v3"}
 gpu_index = 0
+
+
+def resource_path(name):
+    """Finds a bundled file both when running from source and inside the packaged .exe."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
 
 
 def set_title_bar_dark(window):
@@ -311,7 +326,10 @@ def start_process():
 if __name__ == "__main__":
     root = TkinterDnD.Tk()
     root.title("SubtitleSmith")
-    root.iconbitmap("SubtitleSmith.ico")
+    try:
+        root.iconbitmap(resource_path("SubtitleSmith.ico"))
+    except Exception:
+        pass  # a missing icon shouldn't stop the app (and Linux can't use .ico files)
     root.geometry("780x580")
     root.resizable(False, False)
     root.attributes('-alpha', 1.0)
